@@ -1,0 +1,32 @@
+# ---- env / secrets ----
+.env
+.env.*
+!.env.example
+
+# ---- deps ----
+node_modules/
+vendor/
+
+# ---- build / dist ----
+dist/
+build/
+out/
+*.exe
+backend/bin/
+
+# ---- python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# ---- editor / os ----
+.idea/
+.vscode/
+.DS_Store
+*.log
+
+# ---- ardot (design tmp) ----
+.workbuddy/screenshots/
+.workbuddy/memory/

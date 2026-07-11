@@ -1,0 +1,24 @@
+# Agent 服务依赖（Python 3.11+）
+# 多智能体框架（按团队选型启用）
+google-adk>=1.0.0
+# A2A 协议（多智能体协作）
+# a2a>=0.1.0   # 待官方包名确认后取消注释
+
+# Web 服务
+fastapi>=0.111.0
+uvicorn>=0.30.0
+
+# 数据 / 向量检索（只读访问 material_chunks）
+sqlalchemy>=2.0.30
+psycopg2-binary>=2.9.9
+pgvector>=0.2.5
+
+# 基础库
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+httpx>=0.27.0
+python-dotenv>=1.0.1
+
+# 质量门禁（CI / pre-commit）
+ruff>=0.5.0
+mypy>=1.10.0
