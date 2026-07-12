@@ -69,6 +69,26 @@ func (h *Handlers) joinTeam(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": m.Status, "team_id": m.TeamID})
 }
 
+// joinByCode 学生凭班级码加入 teacher team（F2.5 主路径）。
+type joinByCodeReq struct {
+	Code string `json:"code"`
+}
+
+func (h *Handlers) joinByCode(c *gin.Context) {
+	uid := middleware.CtxUserID(c)
+	var req joinByCodeReq
+	if err := c.ShouldBindJSON(&req); err != nil || req.Code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请提供班级码"})
+		return
+	}
+	m, err := h.Svc.Teams.JoinByCode(c.Request.Context(), uid, req.Code)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": m.Status, "team_id": m.TeamID})
+}
+
 func (h *Handlers) approveMember(c *gin.Context) {
 	uid := middleware.CtxUserID(c)
 	teamID, err := bindID(c, "id")

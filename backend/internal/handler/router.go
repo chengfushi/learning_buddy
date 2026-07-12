@@ -34,6 +34,7 @@ func Register(r *gin.Engine, svc *service.Services) {
 		auth.GET("/teams", h.listTeams)
 		auth.POST("/teams", middleware.RequireRole("teacher"), h.createTeam)
 		auth.POST("/teams/:id/join", middleware.RequireRole("student"), h.joinTeam)
+		auth.POST("/teams/join", middleware.RequireRole("student"), h.joinByCode)
 		auth.POST("/teams/:id/members/:uid/approve", middleware.RequireRole("teacher"), h.approveMember)
 		auth.GET("/teams/:id/members", middleware.RequireRole("teacher"), h.listMembers)
 		auth.GET("/teams/:id/materials", h.listTeamMaterials)
