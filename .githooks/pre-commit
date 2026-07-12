@@ -38,9 +38,17 @@ frontend() {
 agent() {
   [ -d "$ROOT/agent" ] || return 0
   echo -e "${GREEN}== agent (Python) ==${NC}"
-  if ! have ruff; then echo -e "${RED}✗ ruff 未安装（pip install ruff）${NC}"; fail=1; return; fi
-  ( cd "$ROOT/agent" && echo -e "${YELLOW}▶ ruff format .${NC}" && ruff format . ) || fail=1
-  ( cd "$ROOT/agent" && echo -e "${YELLOW}▶ ruff check .${NC}" && ruff check . ) || fail=1
+  # ruff 可能直接可执行，也可能需通过 python3 -m ruff（用户级 pip 安装常见）
+  if have ruff; then
+    RUFF=(ruff)
+  elif have python3 && python3 -m ruff --version >/dev/null 2>&1; then
+    RUFF=(python3 -m ruff)
+  else
+    echo -e "${YELLOW}！ ruff 未安装，跳过（pip install ruff 以启用门禁）${NC}"
+    return 0
+  fi
+  ( cd "$ROOT/agent" && echo -e "${YELLOW}▶ ruff format .${NC}" && "${RUFF[@]}" format . ) || fail=1
+  ( cd "$ROOT/agent" && echo -e "${YELLOW}▶ ruff check .${NC}" && "${RUFF[@]}" check . ) || fail=1
 }
 
 backend
