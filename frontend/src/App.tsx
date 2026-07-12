@@ -1,25 +1,76 @@
-import { useQuery } from "react-query";
-import { z } from "zod";
+import { useState } from "react";
+import { useAuth } from "./auth";
+import Login from "./pages/Login";
+import Library from "./pages/Library";
+import Reader from "./pages/Reader";
+import Teams from "./pages/Teams";
+import Companion from "./pages/Companion";
+import Learning from "./pages/Learning";
 
-// 后端响应校验（约定：后端响应用 zod 校验）
-const MaterialSchema = z.object({
-  ID: z.number(),
-  Title: z.string(),
-});
-const MaterialsSchema = z.object({ items: z.array(MaterialSchema) });
+type View = "library" | "teams" | "companion" | "learning";
 
-export function App() {
-  const { data } = useQuery(["materials"], async () => {
-    const r = await fetch("/api/materials");
-    return MaterialsSchema.parse(await r.json());
-  });
+export default function App() {
+  const { user, ready, logout } = useAuth();
+  const [view, setView] = useState<View>("library");
+  const [openMaterial, setOpenMaterial] = useState<number | null>(null);
+  const [companionMat, setCompanionMat] = useState<number | undefined>(undefined);
 
-  // AI 辅助学习（SSE 流式）的入口见 docs/engineering-standards.md R4：
-  // 用 fetch + ReadableStream 携带 Authorization，不要用 EventSource 把 token 放进 URL。
+  if (!ready) return <div className="loading">加载中…</div>;
+  if (!user) return <Login />;
+
   return (
-    <main style={{ padding: 24 }}>
-      <h1>智能学伴</h1>
-      <p>资料数：{data?.items.length ?? 0}</p>
-    </main>
+    <div className="app">
+      <header className="topbar">
+        <div className="logo">智能学伴</div>
+        <nav>
+          <button className={view === "library" ? "nav-on" : ""} onClick={() => setView("library")}>
+            知识库
+          </button>
+          <button className={view === "teams" ? "nav-on" : ""} onClick={() => setView("teams")}>
+            团队
+          </button>
+          <button
+            className={view === "companion" ? "nav-on" : ""}
+            onClick={() => setView("companion")}
+          >
+            AI 学伴
+          </button>
+          <button
+            className={view === "learning" ? "nav-on" : ""}
+            onClick={() => setView("learning")}
+          >
+            学习中心
+          </button>
+        </nav>
+        <div className="user">
+          <span>
+            {user.DisplayName}（{user.Role}）
+          </span>
+          <button className="ghost" onClick={logout}>
+            退出
+          </button>
+        </div>
+      </header>
+      <div className="content">
+        {openMaterial !== null ? (
+          <Reader
+            materialId={openMaterial}
+            onBack={() => setOpenMaterial(null)}
+            onAsk={(id) => {
+              setCompanionMat(id);
+              setOpenMaterial(null);
+              setView("companion");
+            }}
+          />
+        ) : (
+          <>
+            {view === "library" && <Library onOpenMaterial={(id) => setOpenMaterial(id)} />}
+            {view === "teams" && <Teams />}
+            {view === "companion" && <Companion materialId={companionMat} />}
+            {view === "learning" && <Learning />}
+          </>
+        )}
+      </div>
+    </div>
   );
 }
