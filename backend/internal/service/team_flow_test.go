@@ -23,7 +23,7 @@ func newTestServices(t *testing.T) (*Services, *gorm.DB) {
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
-	cfg := &config.Config{DBDSN: dsn, JWTSecret: "test", EmbeddingDim: 768}
+	cfg := &config.Config{DBDSN: dsn, JWTSecret: "test", EmbeddingDim: 1024}
 	repos := repository.New(db)
 	return New(repos, cfg), db
 }

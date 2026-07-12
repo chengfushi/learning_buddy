@@ -113,7 +113,7 @@ def parse(material_id: int, content: str, file_type: str, storage_key: str) -> d
 
 
 def run_chat(question: str, visible_team_ids, top_k: int, history=None) -> tuple[str, list[dict]]:
-    chunks = retrieve(question, visible_team_ids, True, top_k)
+    chunks = retrieve(question, visible_team_ids, top_k, True)
     answer = get_llm().chat(question, chunks, history)
     citations = [
         {
@@ -129,7 +129,7 @@ def run_chat(question: str, visible_team_ids, top_k: int, history=None) -> tuple
 
 
 def run_plan(goal: str, deadline: str | None, visible_team_ids) -> dict:
-    chunks = retrieve(goal, visible_team_ids, True, 5)
+    chunks = retrieve(goal, visible_team_ids, 5, True)
     return get_llm().plan(goal, deadline, chunks)
 
 
@@ -138,7 +138,7 @@ def run_quiz(topic: str, count: int, material_id: int | None, visible_team_ids) 
         # 限定在该资料内检索
         chunks = _retrieve_in_material(topic, material_id, count + 2)
     else:
-        chunks = retrieve(topic, visible_team_ids, True, count + 2)
+        chunks = retrieve(topic, visible_team_ids, count + 2, True)
     return get_llm().quiz(topic, count, chunks)
 
 

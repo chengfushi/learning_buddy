@@ -61,9 +61,13 @@ class OpenAIEmbedder(Embedder):
 
     def embed(self, text: str) -> list[float]:
         resp = httpx.post(
-            f"{settings.llm_base_url.rstrip('/')}/embeddings",
-            headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-            json={"model": settings.llm_model, "input": text},
+            f"{settings.embedding_base_url.rstrip('/')}/embeddings",
+            headers={"Authorization": f"Bearer {settings.embedding_api_key}"},
+            json={
+                "model": settings.embedding_model,
+                "input": text,
+                "dimensions": settings.embedding_dim,
+            },
             timeout=30,
         )
         resp.raise_for_status()
@@ -71,6 +75,6 @@ class OpenAIEmbedder(Embedder):
 
 
 def get_embedder() -> Embedder:
-    if settings.embedding_provider == "openai" and settings.llm_api_key:
+    if settings.embedding_provider == "openai" and settings.embedding_api_key:
         return OpenAIEmbedder()
     return LocalEmbedder()

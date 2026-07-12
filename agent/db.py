@@ -23,11 +23,19 @@ class Settings(BaseSettings):
     # 生产应改为「仅可读 material_chunks + 可写解析结果」的受限凭证。
     pg_dsn: str = "postgres://postgres:postgres@localhost:5432/learning_buddy"
     redis_addr: str = "localhost:6379"
-    embedding_dim: int = 768  # 全库必须一致（engineering-standards R1）
-    embedding_provider: str = "local"  # local | openai
+    embedding_dim: int = 1024  # 全库必须一致（engineering-standards R1）；真实 embedding 为 1024 维
+    embedding_provider: str = "openai"  # local | openai（接入真实嵌入走 openai 兼容）
+
+    # 生成（LLM / 答疑 / 计划 / 测评）—— DeepSeek
     llm_api_key: str = ""
-    llm_base_url: str = "https://api.openai.com/v1"
-    llm_model: str = "gpt-4o-mini"
+    llm_base_url: str = "https://api.deepseek.com/v1"
+    llm_model: str = "deepseek-chat"  # DeepSeek V3（通用/快速）；如需强推理改 deepseek-reasoner
+
+    # 嵌入（Embedding）—— 阿里云百炼 DashScope text-embedding-v4（1024 维）
+    embedding_api_key: str = ""
+    embedding_base_url: str = "https://llm-h85dzp0s5asc2v6i.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    embedding_model: str = "text-embedding-v4"
+
     port: int = 8000
 
 

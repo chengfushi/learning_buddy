@@ -24,7 +24,7 @@ type Config struct {
 func Load() *Config {
 	_ = godotenv.Load() // 忽略缺失的 .env
 
-	dim := 768
+	dim := 1024
 	if v := os.Getenv("EMBEDDING_DIM"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			dim = n
