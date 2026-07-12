@@ -33,7 +33,9 @@ class Settings(BaseSettings):
 
     # 嵌入（Embedding）—— 阿里云百炼 DashScope text-embedding-v4（1024 维）
     embedding_api_key: str = ""
-    embedding_base_url: str = "https://llm-h85dzp0s5asc2v6i.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    embedding_base_url: str = (
+        "https://llm-h85dzp0s5asc2v6i.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    )
     embedding_model: str = "text-embedding-v4"
 
     port: int = 8000
@@ -65,6 +67,33 @@ def health_ok() -> bool:
                 return cur.fetchone() is not None
     except Exception:
         return False
+
+
+def assert_embedding_dim() -> None:
+    """启动时断言配置的 embedding 维度与数据库中 material_chunks.embedding 列一致。
+
+    若不一致直接抛出异常阻止启动（engineering-standards R1：全库维度必须统一）。
+    """
+    configured = embedding_dim()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT atttypmod FROM pg_attribute "
+                "WHERE attrelid = 'material_chunks'::regclass AND attname = 'embedding'"
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise RuntimeError(
+                    "material_chunks.embedding 列不存在，请确认已执行迁移"
+                )
+            # pgvector 列 typmod: vector(N) → atttypmod = N + 4
+            db_dim = row[0] - 4 if row[0] > 4 else row[0]
+            if db_dim != configured:
+                raise RuntimeError(
+                    f"embedding 维度不一致：配置为 {configured}，"
+                    f"但 material_chunks.embedding 列为 vector({db_dim})。"
+                    f"请统一 EMBEDDING_DIM 或重新执行迁移。"
+                )
 
 
 def embedding_dim() -> int:

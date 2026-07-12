@@ -17,6 +17,7 @@ backend/bin/
 # tsc -b 对 vite.config.ts (composite) 的 emit 产物，非源码
 frontend/vite.config.js
 frontend/vite.config.d.ts
+frontend/vite.config.js.timestamp-*
 
 # ---- python ----
 __pycache__/

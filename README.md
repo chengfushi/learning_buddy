@@ -90,7 +90,13 @@ learning_buddy/
 docker compose up -d db redis
 ```
 
-### 2. 启动后端（Go / Gin）
+### 2. 安装 Git 钩子（一次性，提交前自动格式化与检查）
+
+```bash
+git config core.hooksPath .githooks
+```
+
+### 3. 启动后端（Go / Gin）
 
 ```bash
 cd backend
@@ -99,7 +105,7 @@ go run main.go
 # 默认监听 :8080
 ```
 
-### 3. 启动 Agent 服务（Python）
+### 4. 启动 Agent 服务（Python）
 
 ```bash
 cd agent
@@ -108,7 +114,7 @@ python main.py
 # 默认监听 :8000（A2A 端口按配置）
 ```
 
-### 4. 启动前端（React）
+### 5. 启动前端（React）
 
 ```bash
 cd frontend
@@ -138,7 +144,7 @@ MINIO_BUCKET=materials
 LLM_API_KEY=your-key
 PG_DSN=postgres://user:pass@localhost:5432/learning_buddy
 REDIS_ADDR=localhost:6379
-EMBEDDING_DIM=1536
+EMBEDDING_DIM=1024
 ```
 
 **frontend/.env**
@@ -151,9 +157,18 @@ VITE_API_BASE=http://localhost:8080
 ## 贡献指南
 
 1. Fork 并创建特性分支（`feat/xxx`）。
-2. 提交前确保各服务可本地启动、核心链路联通。
-3. 文档变更同步更新 `docs/`。
-4. 发起 Pull Request，描述变更与验证方式。
+2. 安装 Git 钩子：`git config core.hooksPath .githooks`（提交前自动格式化与静态检查）。
+3. 提交前确保各服务可本地启动、核心链路联通。
+4. 使用 **Conventional Commits** 编写提交信息，scope 标注服务：
+   ```
+   feat(backend): 资料 repository 集中化可见 team 谓词
+   fix(agent): Retriever 超时降级为无 RAG
+   docs: 补充数据库文档
+   chore: 升级依赖
+   ```
+5. 权限/安全相关改动**必须带测试**（见 `docs/engineering-standards.md`）。
+6. 文档变更同步更新 `docs/`。
+7. 发起 Pull Request，描述变更与验证方式。
 
 ---
 

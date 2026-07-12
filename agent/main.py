@@ -15,11 +15,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from db import health_ok, settings
+from db import assert_embedding_dim, health_ok, settings
 from rag import parse, retrieve, run_chat, run_plan, run_quiz
 from schemas import ChatRequest, ParseRequest, PlanRequest, QuizRequest, RetrieveRequest
 
 app = FastAPI(title="learning-buddy-agent")
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    assert_embedding_dim()
 
 app.add_middleware(
     CORSMiddleware,
