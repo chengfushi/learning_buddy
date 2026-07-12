@@ -3,37 +3,43 @@
 package main
 
 import (
-	"context"
+	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
+	"learning_buddy/backend/internal/config"
 	"learning_buddy/backend/internal/handler"
 	"learning_buddy/backend/internal/repository"
 	"learning_buddy/backend/internal/service"
 )
 
 func main() {
-	dsn := envOr("DB_DSN", "postgres://learning:learning@localhost:5432/learning_buddy?sslmode=disable")
+	cfg := config.Load()
+	slog.Info("backend starting", "config", cfg.String())
 
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	db, err := gorm.Open(postgres.Open(cfg.DBDSN), &gorm.Config{})
 	if err != nil {
 		slog.Error("connect db", "err", err)
 		os.Exit(1)
 	}
-
-	// 启动维度一致性断言（见 docs/database.md §6）：全库 embedding 维度必须统一
-	assertEmbeddingDim(db, envOr("EMBEDDING_DIM", "768"))
+	// 维度一致性断言（R1）：全库 embedding 维度必须统一，否则启动失败。
+	if err := assertEmbeddingDim(db, cfg.EmbeddingDim); err != nil {
+		slog.Error("embedding dim mismatch", "err", err)
+		os.Exit(1)
+	}
 
 	repos := repository.New(db)
-	svcs := service.New(repos)
+	svcs := service.New(repos, cfg)
 	r := gin.Default()
 	handler.Register(r, svcs)
 
-	addr := envOr("ADDR", ":8080")
+	addr := cfg.Addr
 	slog.Info("backend listening", "addr", addr)
 	if err := r.Run(addr); err != nil {
 		slog.Error("server exit", "err", err)
@@ -41,15 +47,31 @@ func main() {
 	}
 }
 
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
+// assertEmbeddingDim 校验 material_chunks.embedding 列维度与配置一致（防 RAG 静默返回垃圾）。
+func assertEmbeddingDim(db *gorm.DB, wantDim int) error {
+	var typ string
+	// pgvector 的 vector(N) 经 format_type 返回 "vector(N)"
+	if err := db.Raw(
+		"SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = 'material_chunks'::regclass AND attname = 'embedding'",
+	).Scan(&typ).Error; err != nil {
+		return fmt.Errorf("查询 embedding 列维度失败: %w", err)
 	}
-	return def
-}
-
-// assertEmbeddingDim 校验向量表维度与配置一致（防止 RAG 静默返回垃圾，见 engineering-standards R1）
-func assertEmbeddingDim(_ *gorm.DB, _ string) {
-	// 实现示例：查询 material_chunks.embedding 列维度，与 EMBEDDING_DIM 比对；不一致则 os.Exit(1)
-	_ = context.Background()
+	if typ == "" {
+		return fmt.Errorf("material_chunks.embedding 列不存在")
+	}
+	// 解析 "vector(768)" 中的数字
+	start := strings.Index(typ, "(")
+	end := strings.Index(typ, ")")
+	if start < 0 || end < 0 {
+		return fmt.Errorf("无法解析 embedding 列类型: %s", typ)
+	}
+	dim, err := strconv.Atoi(typ[start+1 : end])
+	if err != nil {
+		return fmt.Errorf("无法解析 embedding 维度: %s", typ)
+	}
+	if dim != wantDim {
+		return fmt.Errorf("embedding 维度不一致：库表为 %d，配置为 %d（全库必须统一，见 R1）", dim, wantDim)
+	}
+	slog.Info("embedding dim ok", "dim", dim)
+	return nil
 }
