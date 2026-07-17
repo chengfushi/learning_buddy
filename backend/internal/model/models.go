@@ -44,20 +44,21 @@ func (TeamMember) TableName() string { return "team_members" }
 
 // Material 学习资料（F2）。
 type Material struct {
-	ID          int64       `gorm:"primaryKey;column:id"`
-	TeamID      int64       `gorm:"column:team_id"`
-	Title       string      `gorm:"column:title"`
-	Subject     *string     `gorm:"column:subject"`
-	Chapter     *string     `gorm:"column:chapter"`
-	Tags        StringArray `gorm:"column:tags"`
-	Content     *string     `gorm:"column:content"`
-	FileType    *string     `gorm:"column:file_type"`
-	StorageKey  *string     `gorm:"column:storage_key"`
-	ParseStatus string      `gorm:"column:parse_status;default:pending"` // pending/parsing/done/failed
-	ParseError  *string     `gorm:"column:parse_error"`
-	Shared      bool        `gorm:"column:shared;default:false"` // 仅 teacher team 生效
-	OwnerID     int64       `gorm:"column:owner_id"`
-	CreatedAt   time.Time   `gorm:"column:created_at"`
+	ID              int64       `gorm:"primaryKey;column:id"`
+	TeamID          int64       `gorm:"column:team_id"`
+	Title           string      `gorm:"column:title"`
+	Subject         *string     `gorm:"column:subject"`
+	Chapter         *string     `gorm:"column:chapter"`
+	Tags            StringArray `gorm:"column:tags"`
+	Content         *string     `gorm:"column:content"`
+	FileType        *string     `gorm:"column:file_type"`
+	StorageKey      *string     `gorm:"column:storage_key"`
+	ParseStatus     string      `gorm:"column:parse_status;default:pending"` // pending/parsing/done/failed
+	ParseError      *string     `gorm:"column:parse_error"`
+	ParseGeneration int64       `gorm:"column:parse_generation;default:1"` // 每次重新入队递增，隔离陈旧 worker
+	Shared          bool        `gorm:"column:shared;default:false"`       // 仅 teacher team 生效
+	OwnerID         int64       `gorm:"column:owner_id"`
+	CreatedAt       time.Time   `gorm:"column:created_at"`
 }
 
 func (Material) TableName() string { return "materials" }
@@ -113,6 +114,7 @@ func (AgentMessage) TableName() string { return "agent_messages" }
 // Exercise 测评题目（F8）。
 type Exercise struct {
 	ID         int64     `gorm:"primaryKey;column:id"`
+	UserID     int64     `gorm:"column:user_id"`
 	MaterialID *int64    `gorm:"column:material_id"`
 	SessionID  *string   `gorm:"column:session_id"`
 	Question   string    `gorm:"column:question"`

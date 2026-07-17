@@ -2,6 +2,9 @@ package repository
 
 import (
 	"context"
+	"fmt"
+
+	"gorm.io/gorm"
 
 	"learning_buddy/backend/internal/model"
 )
@@ -34,6 +37,25 @@ func (r *Repositories) ListQuizAttempts(ctx context.Context, userID int64) ([]mo
 
 func (r *Repositories) CreateExercise(ctx context.Context, e *model.Exercise) error {
 	return r.DB.WithContext(ctx).Create(e).Error
+}
+
+func (r *Repositories) GetExerciseForUser(
+	ctx context.Context,
+	exerciseID int64,
+	userID int64,
+) (*model.Exercise, error) {
+	var exercise model.Exercise
+	result := r.DB.WithContext(ctx).
+		Where("id = ? AND user_id = ?", exerciseID, userID).
+		Limit(1).
+		Find(&exercise)
+	if result.Error != nil {
+		return nil, fmt.Errorf("get exercise for user: %w", result.Error)
+	}
+	if result.RowsAffected != 1 {
+		return nil, ErrNotFound
+	}
+	return &exercise, nil
 }
 
 func (r *Repositories) ListExercises(ctx context.Context, materialID *int64) ([]model.Exercise, error) {
@@ -76,14 +98,29 @@ func (r *Repositories) UpdateStudyPlan(ctx context.Context, p *model.StudyPlan) 
 
 // ---- 阅读笔记（F3）----
 
-func (r *Repositories) CreateNote(ctx context.Context, n *model.MaterialNote) error {
-	return r.DB.WithContext(ctx).Create(n).Error
+func (r *Repositories) CreateNoteForVisibleMaterial(ctx context.Context, n *model.MaterialNote) error {
+	if n == nil {
+		return fmt.Errorf("create note for visible material: note is nil")
+	}
+	return r.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		txRepo := New(tx)
+		if _, err := txRepo.GetVisibleMaterial(ctx, n.UserID, n.MaterialID); err != nil {
+			return fmt.Errorf("check note material visibility: %w", err)
+		}
+		if err := tx.Create(n).Error; err != nil {
+			return fmt.Errorf("create material note: %w", err)
+		}
+		return nil
+	})
 }
 
-func (r *Repositories) ListNotes(ctx context.Context, userID, materialID int64) ([]model.MaterialNote, error) {
+func (r *Repositories) ListNotesForVisibleMaterial(ctx context.Context, userID, materialID int64) ([]model.MaterialNote, error) {
+	if _, err := r.GetVisibleMaterial(ctx, userID, materialID); err != nil {
+		return nil, fmt.Errorf("check notes material visibility: %w", err)
+	}
 	var items []model.MaterialNote
 	if err := r.DB.WithContext(ctx).Where("user_id = ? AND material_id = ?", userID, materialID).Order("created_at DESC").Find(&items).Error; err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list material notes: %w", err)
 	}
 	return items, nil
 }

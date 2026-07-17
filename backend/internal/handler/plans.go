@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 
 	"learning_buddy/backend/internal/middleware"
 	"learning_buddy/backend/internal/model"
+	"learning_buddy/backend/internal/repository"
 )
 
 // ---- 学习计划（F7）----
@@ -27,12 +29,7 @@ func (h *Handlers) createPlan(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请提供学习目标 goal"})
 		return
 	}
-	visible, err := h.Svc.Teams.VisibleTeamIDs(c.Request.Context(), uid)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	res, err := h.Svc.Agent.Plan(c.Request.Context(), req.Goal, req.Deadline, visible)
+	res, err := h.Svc.Agent.Plan(c.Request.Context(), uid, req.Goal, req.Deadline)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Agent 规划失败：" + err.Error()})
 		return
@@ -67,6 +64,16 @@ type quizReq struct {
 	Count      int    `json:"count"`
 }
 
+// exerciseResponse 是对学习者的公开题目契约，故意不包含 AnswerKey 与 UserID。
+type exerciseResponse struct {
+	ID         int64
+	MaterialID *int64
+	Question   string
+	Options    []string
+	Difficulty *string
+	CreatedAt  time.Time
+}
+
 func (h *Handlers) createQuiz(c *gin.Context) {
 	uid := middleware.CtxUserID(c)
 	var req quizReq
@@ -77,21 +84,21 @@ func (h *Handlers) createQuiz(c *gin.Context) {
 	if req.Count <= 0 {
 		req.Count = 5
 	}
-	visible, err := h.Svc.Teams.VisibleTeamIDs(c.Request.Context(), uid)
+	items, err := h.Svc.Agent.Quiz(c.Request.Context(), uid, req.Topic, req.MaterialID, req.Count)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-	items, err := h.Svc.Agent.Quiz(c.Request.Context(), req.Topic, req.MaterialID, req.Count, visible)
-	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "资料不存在"})
+			return
+		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Agent 出题失败：" + err.Error()})
 		return
 	}
-	exercises := make([]model.Exercise, 0, len(items))
+	exercises := make([]exerciseResponse, 0, len(items))
 	for _, it := range items {
 		optsJSON, _ := json.Marshal(it.Options)
 		ak := it.AnswerKey
 		e := model.Exercise{
+			UserID:     uid,
 			MaterialID: req.MaterialID,
 			Question:   it.Question,
 			Options:    optsJSON,
@@ -99,7 +106,10 @@ func (h *Handlers) createQuiz(c *gin.Context) {
 			Difficulty: &it.Difficulty,
 		}
 		if err := h.Svc.Repos.CreateExercise(c.Request.Context(), &e); err == nil {
-			exercises = append(exercises, e)
+			exercises = append(exercises, exerciseResponse{
+				ID: e.ID, MaterialID: e.MaterialID, Question: e.Question,
+				Options: it.Options, Difficulty: e.Difficulty, CreatedAt: e.CreatedAt,
+			})
 		}
 	}
 	_ = h.Svc.Repos.RecordTokenUsage(c.Request.Context(), &model.TokenUsage{
@@ -124,20 +134,25 @@ func (h *Handlers) answerQuiz(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少 choice"})
 		return
 	}
-	var e model.Exercise
-	if err := h.Svc.Repos.DB.WithContext(c.Request.Context()).First(&e, "id = ?", exerciseID).Error; err != nil {
+	e, err := h.Svc.Repos.GetExerciseForUser(c.Request.Context(), exerciseID, uid)
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "题目不存在"})
 		return
 	}
-	isCorrect := e.AnswerKey != nil && strings.EqualFold(strings.TrimSpace(req.Choice), strings.TrimSpace(*e.AnswerKey))
+	choice := strings.ToUpper(strings.TrimSpace(req.Choice))
+	if len(choice) != 1 || choice[0] < 'A' || choice[0] > 'D' {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "choice 必须为 A/B/C/D"})
+		return
+	}
+	isCorrect := e.AnswerKey != nil && choice == strings.ToUpper(strings.TrimSpace(*e.AnswerKey))
 	score := 0.0
 	if isCorrect {
 		score = 100.0
 	}
-	ch := req.Choice
+	ch := choice
 	attempt := &model.QuizAttempt{
 		UserID:     uid,
-		ExerciseID: exerciseID,
+		ExerciseID: e.ID,
 		Choice:     &ch,
 		IsCorrect:  &isCorrect,
 		Score:      &score,

@@ -45,6 +45,7 @@ func Register(r *gin.Engine, svc *service.Services) {
 		auth.GET("/materials/:id", h.getMaterial)
 		auth.PUT("/materials/:id", h.updateMaterial)
 		auth.DELETE("/materials/:id", h.deleteMaterial)
+		auth.POST("/materials/:id/retry", middleware.RequireRole("student", "teacher", "super_admin"), h.retryMaterialParse)
 
 		// 笔记（F3）
 		auth.GET("/materials/:id/notes", h.listNotes)

@@ -1,7 +1,7 @@
-"""数据库连接与 pgvector 适配（Agent 仅持 material_chunks 的只读/解析写凭证）。
+"""数据库连接与 pgvector 适配（Agent Parser 仅持解析所需的最小读写凭证）。
 
 安全边界（见 docs/engineering-standards.md §0 / R2 与 system-design.md §7.4）：
-- 检索「可见 team 集合」由后端 repository 计算后通过请求注入，Agent 不自行判定成员/权限。
+- 检索可见性与 pgvector top-k 由后端 repository 执行，Agent 只消费已授权 chunks。
 - 本模块只负责连接与向量适配；任何权限谓词都不在此拼装。
 """
 
@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # 本地默认使用 postgres 超级用户，确保解析流程可写 material_chunks / materials。
-    # 生产应改为「仅可读 material_chunks + 可写解析结果」的受限凭证。
+    # 生产使用 make provision-parser 创建只能读解析状态、回写正文并读写 chunks 的受限凭证。
     pg_dsn: str = "postgres://postgres:postgres@localhost:5432/learning_buddy"
     redis_addr: str = "localhost:6379"
     embedding_dim: int = 1024  # 全库必须一致（engineering-standards R1）；真实 embedding 为 1024 维
@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     )
     embedding_model: str = "text-embedding-v4"
 
+    agent_shared_secret: str = ""
+    retriever_timeout_s: float = 0.8
+    parser_embedding_timeout_s: float = 30.0
+    tutor_timeout_s: float = 30.0
     port: int = 8000
 
 
@@ -83,11 +87,9 @@ def assert_embedding_dim() -> None:
             )
             row = cur.fetchone()
             if row is None:
-                raise RuntimeError(
-                    "material_chunks.embedding 列不存在，请确认已执行迁移"
-                )
-            # pgvector 列 typmod: vector(N) → atttypmod = N + 4
-            db_dim = row[0] - 4 if row[0] > 4 else row[0]
+                raise RuntimeError("material_chunks.embedding 列不存在，请确认已执行迁移")
+            # pgvector 的 vector(N) 在 pg_attribute.atttypmod 中直接记录 N。
+            db_dim = row[0]
             if db_dim != configured:
                 raise RuntimeError(
                     f"embedding 维度不一致：配置为 {configured}，"

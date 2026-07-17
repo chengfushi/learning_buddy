@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -21,6 +22,10 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		slog.Error("invalid backend config", "err", err)
+		os.Exit(1)
+	}
 	slog.Info("backend starting", "config", cfg.String())
 
 	db, err := gorm.Open(postgres.Open(cfg.DBDSN), &gorm.Config{})
@@ -36,6 +41,11 @@ func main() {
 
 	repos := repository.New(db)
 	svcs := service.New(repos, cfg)
+	if err := svcs.Materials.RecoverParseTasks(context.Background()); err != nil {
+		slog.Error("recover parse tasks", "err", err)
+		os.Exit(1)
+	}
+	go svcs.Materials.RunParseDispatcher(context.Background())
 	r := gin.Default()
 	handler.Register(r, svcs)
 

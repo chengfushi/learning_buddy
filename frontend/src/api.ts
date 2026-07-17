@@ -1,3 +1,5 @@
+import { z } from "zod";
+
 // 与后端 REST 契约对齐（后端 GORM 模型无 json tag，按 Go 字段名序列化）。
 // 严格类型，禁用 any（eslint: no-explicit-any）。
 
@@ -29,10 +31,36 @@ export interface Material {
   Content: string | null;
   FileType: string | null;
   ParseStatus: string;
+  ParseGeneration: number;
+  ParseError: string | null;
   Shared: boolean;
   OwnerID: number;
   CreatedAt: string;
 }
+
+const MaterialSchema: z.ZodType<Material> = z.object({
+  ID: z.number(),
+  TeamID: z.number(),
+  Title: z.string(),
+  Subject: z.string().nullable(),
+  Chapter: z.string().nullable(),
+  Tags: z.array(z.string()).nullable(),
+  Content: z.string().nullable(),
+  FileType: z.string().nullable(),
+  ParseStatus: z.string(),
+  ParseGeneration: z.number(),
+  ParseError: z.string().nullable(),
+  Shared: z.boolean(),
+  OwnerID: z.number(),
+  CreatedAt: z.string(),
+});
+
+const TeamMaterialsResponseSchema = z.object({
+  materials: z.array(MaterialSchema),
+  can_write: z.boolean(),
+});
+
+const RetryMaterialResponseSchema = z.object({ material: MaterialSchema });
 
 export interface TeamMember {
   TeamID: number;
@@ -98,7 +126,6 @@ export interface Exercise {
   MaterialID: number | null;
   Question: string;
   Options: string[] | null;
-  AnswerKey: string | null;
   Difficulty: string | null;
   CreatedAt: string;
 }
@@ -142,7 +169,12 @@ class ApiError extends Error {
   }
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  schema?: z.ZodType<T>,
+): Promise<T> {
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -163,7 +195,8 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     throw new ApiError(res.status, msg);
   }
   const text = await res.text();
-  return text ? (JSON.parse(text) as T) : ({} as T);
+  const payload: unknown = text ? JSON.parse(text) : {};
+  return schema ? schema.parse(payload) : (payload as T);
 }
 
 async function streamPost(
@@ -232,7 +265,7 @@ export const api = {
   approveMember: (id: number, uid: number) =>
     request<{ ok: boolean }>("POST", `/teams/${id}/members/${uid}/approve`),
   listTeamMaterials: (id: number) =>
-    request<{ materials: Material[] }>("GET", `/teams/${id}/materials`),
+    request("GET", `/teams/${id}/materials`, undefined, TeamMaterialsResponseSchema),
 
   // 资料
   listMaterials: (teamId?: number, q?: string) => {
@@ -257,6 +290,8 @@ export const api = {
   updateMaterial: (id: number, body: { title?: string; content?: string; shared?: boolean }) =>
     request<{ material: Material }>("PUT", `/materials/${id}`, body),
   deleteMaterial: (id: number) => request<{ ok: boolean }>("DELETE", `/materials/${id}`),
+  retryMaterialParse: (id: number) =>
+    request("POST", `/materials/${id}/retry`, undefined, RetryMaterialResponseSchema),
 
   // 笔记
   listNotes: (id: number) => request<{ notes: MaterialNote[] }>("GET", `/materials/${id}/notes`),

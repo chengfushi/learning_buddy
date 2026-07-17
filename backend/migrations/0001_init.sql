@@ -1,6 +1,6 @@
 -- learning_buddy 初始化迁移 (PG17 + pgvector)
 -- 关系库：PostgreSQL 17；向量：pgvector 0.8.x
--- 维度：EMBEDDING_DIM 统一为 768（与 agent 服务配置保持一致）
+-- 初始基线使用 vector(768)；0004 会升级为当前统一的 vector(1024)。
 -- 注意：本迁移在本地直接由 psql 执行；CI/容器环境可改用 golang-migrate/atlas。
 
 -- 1. 启用扩展（必须最先执行）

@@ -13,16 +13,16 @@
 ## 技术栈 / Architecture
 
 ```
-用户 → 前端(React 18) → 后端(Go/Gin, RBAC+Team) → PostgreSQL + Redis
+用户 → 前端(React 18) → 后端(Go/Gin, RBAC+Team+pgvector 检索) → PostgreSQL + Redis
                               │
-                              └─▶ Agent(Python/FastAPI) → pgvector 向量检索
+                              └─▶ Agent(Python/FastAPI，消费已授权 chunks)
 ```
 
 | 层 | 技术 | 说明 |
 |----|------|------|
 | 前端 | React 18 + TypeScript 5 + Vite 5 + Zod | SPA，React Query 管理服务端状态，SSE 流式对话 |
-| 后端 | Go 1.25 + Gin + GORM + JWT | RESTful API，RBAC + Team 权限模型，Agent 请求代理 |
-| Agent | Python 3.11+ + FastAPI + psycopg2 + pgvector | 多智能体协作（解析 / 检索 / 答疑 / 规划 / 测评），RAG 基于团队知识库 |
+| 后端 | Go 1.25 + Gin + GORM + JWT | RESTful API，RBAC + Team 权限模型，资料权限过滤与 pgvector 检索，Agent 请求代理 |
+| Agent | Python 3.11+ + FastAPI + psycopg2 + pgvector | 资料解析与多智能体生成（答疑 / 规划 / 测评），仅消费 Backend 已授权 chunks |
 | 关系库 | PostgreSQL 16 + pgvector | 业务数据 + 向量存储，IVFFlat 索引 |
 | 缓存 | Redis 7 | 会话上下文、热点缓存、限流 |
 | 文件 | MinIO / S3 | 学习资料文件存储 |
@@ -133,10 +133,10 @@ learning_buddy/
 │   └── go.mod
 ├── agent/                   # Python Agent 服务（RAG + 多智能体）
 │   ├── main.py              # FastAPI 入口
-│   ├── db.py                # 数据库连接（只读凭证）
+│   ├── db.py                # 数据库连接（Parser 最小读写凭证）
 │   ├── embed.py             # Embedding 生成（DashScope 1024 维）
 │   ├── llm.py               # LLM 调用（DeepSeek）
-│   ├── rag.py               # RAG 检索逻辑
+│   ├── rag.py               # 解析与基于已授权 chunks 的生成编排
 │   ├── schemas.py           # Pydantic 模型
 │   ├── tests/               # 单测与集成测试
 │   └── requirements.txt
@@ -167,6 +167,8 @@ learning_buddy/
 | `REDIS_ADDR` | Redis 地址 | `localhost:6379` |
 | `JWT_SECRET` | JWT 签名密钥 | —（**必须修改**） |
 | `AGENT_BASE_URL` | Agent 服务地址 | `http://localhost:8000` |
+| `AGENT_SHARED_SECRET` | Backend→Agent 服务认证共享密钥（必填，两端一致） | — |
+| `PARSE_ALERT_WEBHOOK_URL` | 解析任务重试耗尽告警 Webhook（可选） | — |
 | `MINIO_ENDPOINT` | 对象存储端点 | `localhost:9000` |
 | `MINIO_BUCKET` | 存储桶名称 | `materials` |
 | `MINIO_ACCESS_KEY` | 对象存储访问密钥 | `minioadmin` |
@@ -181,13 +183,17 @@ learning_buddy/
 | `LLM_API_KEY` | LLM API 密钥（DeepSeek） | —（**必须填写**） |
 | `LLM_BASE_URL` | LLM API 端点 | `https://api.deepseek.com/v1` |
 | `LLM_MODEL` | 模型名称 | `deepseek-chat` |
-| `PG_DSN` | PostgreSQL 只读连接串 | `postgres://learning_ro:learning@localhost:5432/learning_buddy` |
+| `PG_DSN` | Agent Parser 数据库连接串（生产使用最小读写权限） | 本地 Compose 使用 `learning` 开发用户 |
 | `REDIS_ADDR` | Redis 地址 | `localhost:6379` |
 | `EMBEDDING_PROVIDER` | Embedding 提供商 | `openai`（兼容模式） |
 | `EMBEDDING_API_KEY` | Embedding API 密钥（DashScope） | —（**必须填写**） |
 | `EMBEDDING_BASE_URL` | Embedding API 端点 | DashScope 兼容端点 |
 | `EMBEDDING_MODEL` | Embedding 模型 | `text-embedding-v4` |
 | `EMBEDDING_DIM` | 向量维度 | `1024` |
+| `AGENT_SHARED_SECRET` | Backend→Agent 服务认证共享密钥（必填，两端一致） | — |
+| `RETRIEVER_TIMEOUT_S` | 答疑检索单跳预算（秒） | `0.8` |
+| `PARSER_EMBEDDING_TIMEOUT_S` | 资料解析单个 chunk 的 Embedding 超时（秒） | `30` |
+| `TUTOR_TIMEOUT_S` | 答疑生成单跳预算（秒） | `30` |
 | `PORT` | 监听端口 | `8000` |
 
 ### frontend/.env
@@ -237,7 +243,7 @@ learning_buddy/
 |--------|------|------|------|
 | `GET` | `/api/agent/sessions` | 我的会话列表 | 是 |
 | `GET` | `/api/agent/sessions/:id` | 会话详情（含历史消息） | 是 |
-| `POST` | `/api/agent/chat` | AI 对话（**SSE 流式**，检索可见 team + `shared`） | 是 |
+| `POST` | `/api/agent/chat` | AI 对话（Backend 检索已授权 chunks，Agent **SSE 流式**生成） | 是 |
 | `POST` | `/api/agent/plan` | 生成学习计划（落 `study_plans`） | 是 |
 | `POST` | `/api/agent/quiz` | 生成测评题目（落 `exercises`） | 是 |
 | `POST` | `/api/agent/quiz/:id/answer` | 提交测评答案并批改 | 是 |
@@ -262,7 +268,7 @@ learning_buddy/
 | **老师** `teacher` | 创建学习小组 team，生成 `join_code`；审批学生加入 | 仅老师能在自己的 team 上传资料；逐份设置 `shared` 控制对学生可见 |
 | **超级管理员** `super_admin` | 维护公共库（`type='public'`） | 上传的资料全平台可见 |
 
-> **安全铁律**：权限谓词（`team_id IN(可见集) AND shared` 过滤）只在后端 repository 层构建，Agent 仅持 `material_chunks` 的**只读**凭证，不直接访问权限表。
+> **安全铁律**：权限谓词与 pgvector top-k 只在后端 repository 层构建；Agent 不提供 `/retrieve`，只消费已授权 chunks。Parser 凭证不得访问用户、成员或认证数据。
 
 ---
 
@@ -274,7 +280,7 @@ learning_buddy/
 users ──< team_members >── teams ──< materials ──< material_chunks (vector)
 users ──< learning_records ──> materials
 users ──< agent_sessions ──< agent_messages
-users ──< quiz_attempts >── exercises ──< materials
+users ──< exercises ──< quiz_attempts; exercises ──> materials
 users ──< study_plans
 users ──< user_profiles (1:1)
 users ──< token_usage
@@ -309,7 +315,7 @@ make format
 # 静态检查（三栈）
 make lint
 
-# 数据库迁移（占位）
+# 数据库迁移（按文件名顺序幂等执行）
 make migrate
 ```
 
@@ -322,7 +328,7 @@ make migrate
 3. **提交规范**：使用 [Conventional Commits](https://www.conventionalcommits.org/)，scope 标注服务：
    ```
    feat(backend): 资料 repository 集中化可见 team 谓词
-   fix(agent): Retriever 超时降级为无 RAG
+   fix(backend): 检索超时降级为空 chunks
    docs: 补充数据库文档
    chore: 升级依赖
    ```

@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality-and-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: learning_buddy
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d learning_buddy"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      DB_DSN: postgres://postgres:postgres@127.0.0.1:5432/learning_buddy?sslmode=disable
+      PG_DSN: postgres://postgres:postgres@127.0.0.1:5432/learning_buddy
+      EMBEDDING_DIM: "1024"
+      EMBEDDING_PROVIDER: local
+      EMBEDDING_API_KEY: ""
+      LLM_API_KEY: ""
+      AGENT_SHARED_SECRET: ci-only-agent-shared-secret
+      AGENT_BASE_URL: http://127.0.0.1:8000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: backend/go.sum
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: agent/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Apply database migrations
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for migration in backend/migrations/*.sql; do
+            psql -h 127.0.0.1 -U postgres -d learning_buddy -v ON_ERROR_STOP=1 -f "$migration"
+          done
+
+      - name: Backend vet, tests, and coverage report
+        working-directory: backend
+        run: |
+          go vet ./...
+          go test ./... -coverprofile=coverage.out
+          go tool cover -func=coverage.out | tee coverage.txt
+
+      - name: Install Agent dependencies
+        working-directory: agent
+        run: python -m pip install -r requirements.txt
+
+      - name: Agent lint and tests
+        working-directory: agent
+        run: |
+          ruff check .
+          python -m pytest tests/ -v --cov=. --cov-fail-under=70 --cov-report=term-missing --cov-report=xml:coverage.xml
+
+      - name: Install Frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Frontend lint, tests, and build
+        working-directory: frontend
+        run: |
+          npx eslint src/
+          npm run coverage
+          npm run build
+
+      - name: Full-stack and permission E2E
+        run: |
+          set -euo pipefail
+          AGENT_PID=""
+          BACKEND_PID=""
+          cleanup() {
+            [ -z "$BACKEND_PID" ] || kill "$BACKEND_PID" 2>/dev/null || true
+            [ -z "$AGENT_PID" ] || kill "$AGENT_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          (cd agent && python -m uvicorn main:app --host 127.0.0.1 --port 8000) >/tmp/agent.log 2>&1 &
+          AGENT_PID=$!
+          for _ in $(seq 1 40); do
+            curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1 && break
+            sleep 0.25
+          done
+          curl -fsS http://127.0.0.1:8000/health >/dev/null || { cat /tmp/agent.log; exit 1; }
+
+          (cd backend && go run .) >/tmp/backend.log 2>&1 &
+          BACKEND_PID=$!
+          for _ in $(seq 1 60); do
+            curl -sS -o /dev/null http://127.0.0.1:8080/ 2>/dev/null && break
+            sleep 0.25
+          done
+          curl -sS -o /dev/null http://127.0.0.1:8080/ || { cat /tmp/backend.log; exit 1; }
+
+          bash tests/e2e/e2e.sh
+          bash tests/e2e/r2.sh
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            backend/coverage.out
+            backend/coverage.txt
+            agent/coverage.xml
+            frontend/coverage/coverage-summary.json
+          if-no-files-found: warn

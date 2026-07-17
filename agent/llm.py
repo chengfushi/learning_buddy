@@ -117,7 +117,7 @@ class OpenAILLM(LLM):
                 ],
                 "temperature": 0.3,
             },
-            timeout=60,
+            timeout=settings.tutor_timeout_s,
         )
         resp.raise_for_status()
         return resp.json()["choices"][0]["message"]["content"]
@@ -137,10 +137,7 @@ class OpenAILLM(LLM):
         )
         import json
 
-        try:
-            return json.loads(text)
-        except Exception:
-            return {"title": goal, "goal": goal, "items": []}
+        return json.loads(text)
 
     def quiz(self, topic: str, count: int, chunks: list[ChunkView]) -> list[dict]:
         ctx = "\n".join(_first_sentence(c.content) for c in chunks[:5])
@@ -150,10 +147,7 @@ class OpenAILLM(LLM):
         )
         import json
 
-        try:
-            return json.loads(text)
-        except Exception:
-            return []
+        return json.loads(text)
 
 
 def get_llm() -> LLM:

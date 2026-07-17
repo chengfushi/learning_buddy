@@ -1,7 +1,7 @@
 # 智能学伴系统 · 系统设计文档
 
 > 版本：v0.3 · 状态：设计稿（修订） · 最后更新：2026-07-11
-> 变更：v0.3 修复需求审核问题——RAG 加 `shared` 强制过滤、Agent 只读凭证、班级码+审批态、文件/解析状态机、embedding 维度配置、补四张缺表（exercises/quiz_attempts/study_plans/user_profiles/token_usage）、订阅额度接限流、K12 内容安全、路线图重排
+> 变更：v0.4 将资料可见性与 pgvector top-k 收口 Backend repository，Agent 生成端只消费已授权 chunks，Parser 使用最小读写凭证；同时完善班级码+审批态、解析状态机与 embedding 维度断言。
 
 ---
 
@@ -52,21 +52,21 @@
 ┌───────────────────────────▼─────────────────────────────────┐
 │              后端层  (Go + Gin)  —— 业务 & 数据网关            │
 │  认证/授权 │ Team&RBAC │ 资料 CRUD │ 学习记录 │ Agent 网关      │
-│  · 计算「用户可见 team 集合」→ 下发给 Agent 做检索过滤         │
+│  · repository 权限过滤 + pgvector top-k → 已授权 chunks        │
 └──────┬──────────────────────┬───────────────────┬───────────┘
        │                      │                   │
        ▼                      ▼                   ▼
 ┌──────────────┐     ┌────────────────┐   ┌──────────────────────┐
 │ PostgreSQL   │     │   Redis 7      │   │  Agent 层 (Python)    │
 │ + pgvector   │     │ 会话/热点/限流  │   │  Google ADK + A2A     │
-│ teams/资料/向量│     │               │   │  Orchestrator+Retriever│
+│ teams/资料/向量│     │               │   │  Orchestrator+Parser   │
 └──────────────┘     └────────────────┘   │  +Tutor+Planner+Evaluator│
                                           └──────────┬───────────┘
                                                      │ A2A (HTTP/JSON)
                                           ┌──────────▼───────────┐
-                                          │ Retriever 按「可见 team  │
-                                          │ 集合 + shared 谓词」检索 │
-                                          │ pgvector（只读凭证）    │
+                                          │ Parser 写当前代次 chunks│
+                                          │ 生成任务只消费 Backend  │
+                                          │ 已授权 chunks           │
                                           └──────────────────────┘
 ```
 
@@ -75,8 +75,8 @@
 | 层 | 职责 | 不负责 |
 |----|------|--------|
 | 前端 | 交互、状态、渲染、调用后端 API | 业务逻辑、数据存储、模型推理 |
-| 后端 | 鉴权、Team/RBAC、资料 CRUD、计算可见 team 集合、Agent 请求代理 | 模型推理、向量检索实现 |
-| Agent | 意图理解、资料解析、RAG、多 Agent 协作、生成回答 | 用户体系、资料权限判定（由后端把关） |
+| 后端 | 鉴权、Team/RBAC、资料 CRUD、资料权限过滤、pgvector 检索、Agent 请求代理 | 模型推理 |
+| Agent | 意图理解、资料解析、多 Agent 协作、基于已授权 chunks 生成回答 | 用户体系、资料权限判定与向量检索 |
 | 数据 | 持久化、向量检索、缓存 | 业务逻辑 |
 
 ---
@@ -112,7 +112,7 @@
 
 ### 5.3 AI 辅助学习模式
 
-- **智能答疑**：选中文本/整页提问，Agent 基于「用户可见 team 集合」的多个知识库 RAG 回答并附引用（标明来源 team / 资料）。
+- **智能答疑**：选中文本/整页提问，Backend repository 先在用户可见范围内完成 RAG 检索，Agent 仅基于已授权 chunks 回答并附引用（标明来源 team / 资料）。
 - **学习规划**：Planner Agent 按目标与期限生成计划。
 - **智能测评**：Evaluator Agent 生成测验并批改。
 - **对话式伴学**：多轮对话、记忆上下文、可回溯历史会话。
@@ -140,8 +140,8 @@ handler (Gin) → service (业务/RBAC/team) → repository (GORM) → PostgreSQ
                                   ↘ agent client (调用 Agent 服务)
 ```
 
-- **Middleware**：JWT 鉴权、RBAC 校验、可见 team 计算、限流、日志/追踪。
-- **Agent Client**：封装对 Agent 的 HTTP 调用，含超时、重试、SSE 流式转发；请求中携带「用户可见 team 集合」。
+- **Middleware**：JWT 鉴权、RBAC 校验、限流、日志/追踪。资料可见性计算与 pgvector 检索收口在 repository。
+- **Agent Client**：封装对 Agent 的 HTTP 调用，含超时、重试、SSE 流式转发；生成请求只携带 repository 已过滤的 chunks，不下发权限谓词。
 
 ### 6.2 权限模型（RBAC）与团队（Team）
 
@@ -169,14 +169,14 @@ handler (Gin) → service (业务/RBAC/team) → repository (GORM) → PostgreSQ
 
 - 权限点示例：`material:read`、`material:write`、`team:create`、`team:manage`、`team:approve`、`user:manage`、`agent:chat`。
 - 数据隔离：学习记录、对话历史按 `user_id` 行级隔离；资料按 `team_id` + `shared` 控制可见性。
-- 关键规则：**每个 team 即一个知识库**；检索严格限定在「用户可见 team 集合」内，且 teacher team 仅取 `shared=true` 的材料。
+- 关键规则：**每个 team 即一个知识库**；资料读取严格限定在「用户可见 team 集合」内。owner 可管理自己 teacher team 的草稿，其他用户必须为 `approved` 成员且资料 `shared=true`；详情、team 列表与笔记复用同一 repository scope。
 
 ### 6.3 团队与知识库（Team & Knowledge Base）
 
 - **老师的 team（学习小组）**：老师创建（生成 `join_code`），成员为学生；仅老师可上传资料；每份资料有 `shared` 开关——开启后 team 内 `approved` 学生可见，关闭则仅老师自己可见（备课/草稿）。
 - **学生的私人 team**：系统为每个学生注册时自动生成一个私有 team，学生自己上传的资料仅自己可见。
 - **公共库（public）**：由超级管理员维护的系统级 team（`type='public'`），资料全平台可见；不写入 `team_members`，仅由可见性计算特判。
-- **知识库本质**：team 是资料与向量的逻辑容器。资料上传后由 Agent 做结构化解析（切分、抽取章节/知识点、生成 Embedding），写入该 team 对应的 `material_chunks`；RAG 检索时只在「用户可见的 team 集合」内取片段，且 teacher team 仅取 `shared=true`，天然实现权限隔离。
+- **知识库本质**：team 是资料与向量的逻辑容器。资料上传后由 Agent Parser 做结构化解析（切分、抽取章节/知识点、生成 Embedding），通过最小写权限账号写入 `material_chunks`；问答/规划/测评的 RAG 可见性谓词与 pgvector top-k 均由 Backend repository 执行，Agent 只消费已授权 chunks。
 - **解析自动化**：`POST /api/materials` 成功后由后端**异步**触发 Parser 任务（文件落对象存储 → 入队 → 解析 → 写 chunks → 更新 `parse_status`）；`parse_status` 为 `pending/parsing/done/failed`，前端据此展示进度。
 
 ### 6.4 核心模块
@@ -188,7 +188,7 @@ handler (Gin) → service (业务/RBAC/team) → repository (GORM) → PostgreSQ
 | User | 用户资料、角色、订阅状态 |
 | Material | 资料 CRUD（归属 team）、`shared` 可见性、触发解析 |
 | Learning | 学习记录、练习成绩、进度聚合 |
-| Agent Gateway | 代理 Agent 请求，注入用户上下文与「可见 team 集合」 |
+| Agent Gateway | 调用 repository 检索已授权 chunks，代理 Agent 生成请求与 SSE 转发 |
 
 ### 6.5 API 设计（REST 摘要）
 
@@ -207,15 +207,16 @@ handler (Gin) → service (业务/RBAC/team) → repository (GORM) → PostgreSQ
 | GET | `/api/materials` | 资料列表（按可见 team 过滤） | 是 |
 | GET | `/api/materials/:id` | 资料详情（含 `parse_status`） | 是 |
 | PUT | `/api/materials/:id` | 更新资料 / 切 `shared`（变更触发重解析） | 是 |
+| POST | `/api/materials/:id/retry` | 重试 `failed` 解析任务（需 team 写权限） | 是 |
 | DELETE | `/api/materials/:id` | 删除资料（级联删 chunks） | 是 |
 | GET | `/api/learning/records` | 我的学习记录 | 是 |
 | POST | `/api/learning/exercise` | 提交练习 | 是 |
-| POST | `/api/agent/chat` | AI 对话（SSE 流式，检索可见 team + `shared`） | 是 |
+| POST | `/api/agent/chat` | AI 对话（Backend 检索已授权 chunks，Agent SSE 流式生成） | 是 |
 | POST | `/api/agent/plan` | 生成学习计划（落 `study_plans`） | 是 |
 | POST | `/api/agent/quiz` | 生成测评（落 `exercises`） | 是 |
 | GET | `/api/agent/sessions` | 我的会话列表 | 是 |
 
-> 所有写接口受 RBAC 约束；`/api/agent/*` 由后端向 Agent 注入 `user_id`、订阅档位与「可见 team 集合 + `shared` 过滤谓词」，Agent 不直接读权限表，仅持 `material_chunks` 的**只读**凭证执行检索。
+> 所有写接口受 RBAC 约束；`/api/agent/*` 先由 Backend repository 应用统一可见性谓词并执行 pgvector top-k，再向 Agent 下发已授权 chunks。Agent Parser 仅持解析所需的最小数据库权限，不可读取用户、成员或认证表。
 
 ---
 
@@ -227,9 +228,9 @@ handler (Gin) → service (业务/RBAC/team) → repository (GORM) → PostgreSQ
 
 | Agent | 职责 |
 |-------|------|
-| **Orchestrator** | 接收后端请求（含可见 team 集合），意图分类，拆解子任务，路由并聚合 |
+| **Orchestrator** | 接收后端请求（含 repository 已过滤 chunks），意图分类，路由并聚合 |
 | **Parser** | 资料结构化解析：切分、抽取章节/知识点、生成 Embedding，落对应 team |
-| **Retriever** | 在「可见 team 集合」内做向量检索，重排，返回资料片段 |
+| **Backend Retriever** | repository 应用统一资料可见性谓词后执行 pgvector top-k，返回已授权片段 |
 | **Tutor** | 答疑讲解：基于检索片段 + 对话历史生成通俗讲解，附引用（team/资料/章节） |
 | **Planner** | 学习计划：按目标/期限/水平生成结构化计划 |
 | **Evaluator** | 测评与批改：出题、判分、给薄弱点建议 |
@@ -238,29 +239,31 @@ handler (Gin) → service (业务/RBAC/team) → repository (GORM) → PostgreSQ
 ### 7.2 A2A 交互示例（答疑）
 
 ```
-后端 ──POST /agent/chat (可见 team 集合)──▶ Orchestrator
-Orchestrator ──A2A task──▶ Retriever   (仅在该 team 集合内返回 top-k)
+后端 repository ──可见性谓词 + pgvector top-k──▶ 已授权 chunks
+后端 ──POST /agent/chat (chunks)──▶ Orchestrator
 Orchestrator ──A2A task──▶ Tutor       (片段 + 问题 + 历史 → 回答)
 Orchestrator ──SSE 流式──▶ 后端 ──▶ 前端
 ```
 
 ### 7.3 RAG 流程
 
-1. 问题（+ 当前资料上下文）→ Embedding。
-2. 在「可见 team 集合」的 `material_chunks` 内近似检索。
+1. Backend 调 Agent `/embed` 将问题转为 Embedding（800ms 检索总预算）。
+2. Backend repository 在 `VisibleMaterialsScope` 子查询内执行 pgvector top-k；指定 `material_id` 仍先验证可见性。
 3. 重排 → 拼入 prompt。
 4. LLM 生成回答，输出引用来源（team / material / chapter）。
 5. 新问答写入对话历史（Redis 短期 + PostgreSQL 长期）。
+
+> **R6 超时与降级**：Backend 对 Embedding + repository 检索设置 `800ms` 总预算，失败或超时则向 Agent 下发空 chunks；Agent 对 Tutor 设置 `30s` 预算，失败时切换本地 MockLLM。SSE 响应返回 `X-Trace-ID` 便于关联日志。
 
 ### 7.4 上下文与记忆
 
 - **短期上下文**：当前会话轮次存 Redis（TTL 可配）。
 - **长期记忆**：用户画像、薄弱点、偏好存 PostgreSQL。
-- **安全**：Agent 仅持 `material_chunks` 的只读凭证；检索谓词（可见 team 集合 + teacher team 仅 `shared=true`）由后端计算后下发，Agent 无法直接访问全库或权限表。
+- **安全**：可见性谓词与向量 SQL 只存在于 Backend repository；Agent 不提供 `/retrieve`，请求契约只接收已授权 chunks。Parser 的数据库凭证仅需读取资料归属、更新正文并读写 chunks，不得访问用户、成员与认证数据。
 
 ### 7.5 资料结构化解析与团队知识库
 
-- 任意资料（老师 team / 学生私人 team / 公共库）上传后，后端**异步**触发 Agent 的 **Parser 任务**：文件落对象存储 → 切分 → 抽取结构 → 生成 Embedding → 写入该 team 的 `material_chunks`（更新 `parse_status`）。
+- 任意资料上传后，后端**异步**触发 Agent Parser：Backend repository 独占 `materials.parse_status` 状态机，并为每次重新入队递增 `parse_generation`。worker 完成、Agent 替换 chunks 都必须匹配当前代次；Agent 再以 `pg_advisory_xact_lock(material_id)` 串行化写入并校验状态仍为 `parsing`。唯一索引 `(material_id, chunk_idx)` 阻止重复片段，迟到请求无法覆盖新内容或最终状态。
 - 检索时，后端根据用户身份算出**有效检索谓词**：`team_id IN (可见集合) AND (teams.type <> 'teacher' OR materials.shared = true)`，仅在该谓词内做向量检索——teacher team 的草稿（`shared=false`）绝不会被学生召回。
 - 学生私人 team 的资料也会被解析进其私有知识库，使其 AI 答疑可基于「自己的资料」作答。
 
@@ -315,6 +318,7 @@ CREATE TABLE materials (
   storage_key VARCHAR(512),                 -- 对象存储键（MinIO/S3）
   parse_status VARCHAR(20) DEFAULT 'pending', -- pending/parsing/done/failed
   parse_error VARCHAR(512),
+  parse_generation BIGINT DEFAULT 1,          -- 每次重新入队递增，隔离陈旧 worker
   shared      BOOLEAN DEFAULT false,        -- 仅 teacher team 生效：是否对 team 学生成员可见
   owner_id    BIGINT REFERENCES users(id),
   created_at  TIMESTAMPTZ DEFAULT now()
@@ -353,9 +357,11 @@ CREATE TABLE agent_messages (
 -- 测评题目与作答（Evaluator）
 CREATE TABLE exercises (
   id          BIGSERIAL PRIMARY KEY,
+  user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   material_id BIGINT REFERENCES materials(id),
   session_id  UUID REFERENCES agent_sessions(id),
   question    TEXT NOT NULL,
+  options     JSONB,
   answer_key  TEXT,
   difficulty  VARCHAR(20),
   created_at  TIMESTAMPTZ DEFAULT now()
@@ -421,7 +427,7 @@ CREATE TABLE material_chunks (
 CREATE INDEX idx_chunk_team ON material_chunks(team_id);
 CREATE INDEX idx_chunk_vec ON material_chunks
   USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
--- 检索谓词（后端下发）：team_id IN (可见集合) AND (teams.type <> 'teacher' OR materials.shared = true)
+-- 检索谓词（Backend repository 直接执行）：team_id IN (可见集合) AND (teams.type <> 'teacher' OR materials.shared = true)
 ```
 
 ### 8.3 Redis 缓存策略
@@ -436,13 +442,15 @@ CREATE INDEX idx_chunk_vec ON material_chunks
 
 > **缓存失效**：当 `material.shared` 翻转、或 `team_members` 增删/审批状态变化时，主动删除 `team:visible:{user_id}` 与 `user:profile:{user_id}`，避免学生最多 5 分钟内脏读草稿或漏看新公开资料。
 
+> **当前实现（R7）**：上述 Redis key 仍是目标设计，Go Backend 目前没有可见集缓存，所有可见性查询直接以 repository + PostgreSQL 为真源，因此 shared 翻转和成员审批会在下一次查询立即生效。未来启用缓存时，失效逻辑必须集中在 repository 写方法内，并通过现有即时可见性集成测试。
+
 ---
 
 ## 9. 安全设计
 
-- **认证**：JWT（access + refresh）；refresh 用 **httpOnly + Secure Cookie**（优于 localStorage，抗 XSS）；SSE 流式对话通过握手首帧或 query 参数传递 access token（`EventSource` 不能自定义 Header）。
+- **认证**：JWT（access + refresh）；SSE 流式对话强制使用 `fetch + ReadableStream`，access token 仅通过 `Authorization: Bearer` Header 传递，禁止 `EventSource` 或 URL query token，避免 token 进入访问日志。
 - **授权**：RBAC + team 可见性 + 行级隔离；资料可见性在 repository 层强制，且 teacher team 仅返回 `shared=true`。
-- **Agent 边界**：后端向 Agent 下发「可见 team 集合 + `shared` 过滤谓词」；Agent 仅持 `material_chunks` 的**只读** DB 角色，无法直接访问权限表或全库。
+- **Agent 边界**：后端 repository 完成权限过滤与向量检索，只向 Agent 下发已授权 chunks；所有业务请求必须携带 `X-Agent-Token` 共享密钥，Agent 使用常量时间比较并默认拒绝无凭证调用。Agent 无权访问用户、成员或认证数据。
 - **传输**：全站 HTTPS；SSE/WebSocket 同样鉴权。
 - **内容安全**：K12 场景下对用户输入与模型输出做内容审核网关（关键词 + 模型护栏），防止不当内容。
 - **限流**：Agent 对话按用户维度限流。
@@ -462,7 +470,7 @@ docker-compose:
 ```
 
 - 前端静态资源由 Nginx 托管，API 反代到后端。
-- 后端与 Agent 内部互通；Agent 不暴露公网。
+- 后端与 Agent 仅在容器内部网络互通；Agent 不映射宿主机端口、不暴露公网，共享密钥通过 `AGENT_SHARED_SECRET` 注入且两端必须一致。
 - 可选 K8s：backend/agent 独立 HPA 扩缩容。
 
 ---

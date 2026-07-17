@@ -13,17 +13,28 @@ export default function Reader({
   const [material, setMaterial] = useState<Material | null>(null);
   const [notes, setNotes] = useState<MaterialNote[]>([]);
   const [note, setNote] = useState("");
+  const [loadingMaterial, setLoadingMaterial] = useState(true);
+  const [loadingNotes, setLoadingNotes] = useState(true);
   const [err, setErr] = useState("");
+  const [notesErr, setNotesErr] = useState("");
 
   const load = () => {
+    setMaterial(null);
+    setNotes([]);
+    setLoadingMaterial(true);
+    setLoadingNotes(true);
+    setErr("");
+    setNotesErr("");
     api
       .getMaterial(materialId)
       .then((r) => setMaterial(r.material))
-      .catch((e) => setErr(e instanceof Error ? e.message : "加载失败"));
+      .catch((e) => setErr(e instanceof Error ? e.message : "加载失败"))
+      .finally(() => setLoadingMaterial(false));
     api
       .listNotes(materialId)
       .then((r) => setNotes(r.notes))
-      .catch(() => undefined);
+      .catch((e) => setNotesErr(e instanceof Error ? e.message : "笔记加载失败"))
+      .finally(() => setLoadingNotes(false));
   };
   useEffect(() => {
     load();
@@ -52,7 +63,9 @@ export default function Reader({
         </button>
       </div>
       {err && <div className="err">{err}</div>}
-      {material && (
+      {loadingMaterial ? (
+        <div className="muted small">正在加载资料…</div>
+      ) : material ? (
         <article className="card">
           <h2>{material.Title}</h2>
           <div className="muted small">
@@ -63,9 +76,10 @@ export default function Reader({
             {material.Content || "（暂无正文，可能是未解析的文件类资料）"}
           </div>
         </article>
-      )}
+      ) : null}
       <section className="card">
         <h3>我的笔记</h3>
+        {notesErr && <div className="err">{notesErr}</div>}
         <form className="form" onSubmit={addNote}>
           <textarea
             placeholder="写下你的理解或标注…"
@@ -78,12 +92,18 @@ export default function Reader({
           </button>
         </form>
         <ul className="notes">
-          {notes.map((n) => (
-            <li key={n.ID} className="note">
-              {n.Content}
-            </li>
-          ))}
-          {notes.length === 0 && <li className="muted small">还没有笔记。</li>}
+          {loadingNotes ? (
+            <li className="muted small">正在加载笔记…</li>
+          ) : (
+            <>
+              {notes.map((n) => (
+                <li key={n.ID} className="note">
+                  {n.Content}
+                </li>
+              ))}
+              {notes.length === 0 && <li className="muted small">还没有笔记。</li>}
+            </>
+          )}
         </ul>
       </section>
     </div>

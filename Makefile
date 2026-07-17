@@ -1,6 +1,6 @@
 # learning_buddy 常用命令
 
-.PHONY: infra dev lint format migrate
+.PHONY: infra dev lint format migrate provision-parser
 
 ## 仅起基础设施（db / redis / minio）
 infra:
@@ -22,6 +22,16 @@ lint:
 	cd frontend && npm run lint
 	cd agent && ruff check .
 
-## 跑数据库迁移（占位：接入 golang-migrate / atlas 后实现）
+## 按文件名顺序执行全部数据库迁移；调用示例：DB_DSN=postgres://... make migrate
 migrate:
-	@echo "TODO: 接入迁移工具（golang-migrate / atlas）后在此执行"
+	@test -n "$$DB_DSN" || (echo "DB_DSN is required" >&2; exit 1)
+	@set -e; for migration in backend/migrations/*.sql; do \
+		echo "applying $$migration"; \
+		psql "$$DB_DSN" -v ON_ERROR_STOP=1 -f "$$migration"; \
+	done
+
+## 用管理员 DSN 创建/更新 Agent Parser 最小权限账号
+provision-parser:
+	@test -n "$$DB_DSN" || (echo "DB_DSN is required" >&2; exit 1)
+	@test -n "$$PARSER_DB_PASSWORD" || (echo "PARSER_DB_PASSWORD is required" >&2; exit 1)
+	@psql "$$DB_DSN" -v ON_ERROR_STOP=1 --single-transaction -f backend/scripts/provision_parser.sql

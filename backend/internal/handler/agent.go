@@ -3,6 +3,7 @@ package handler
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 
 	"learning_buddy/backend/internal/middleware"
 	"learning_buddy/backend/internal/model"
+	"learning_buddy/backend/internal/repository"
 	"learning_buddy/backend/internal/service"
 )
 
@@ -21,7 +23,7 @@ type chatReq struct {
 }
 
 // chat 流式答疑：SSE 转发 Agent 输出，并在收尾时落库（会话/消息/引用/token 用量）。
-// 安全：后端向 Agent 注入「可见 team 集合」，Agent 仅持 material_chunks 检索能力（docs §7.4）。
+// 安全：Backend repository 先检索出已授权 chunks，Agent 不接触可见性谓词。
 func (h *Handlers) chat(c *gin.Context) {
 	uid := middleware.CtxUserID(c)
 
@@ -32,8 +34,12 @@ func (h *Handlers) chat(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	visible, err := h.Svc.Teams.VisibleTeamIDs(ctx, uid)
+	chunks, err := h.Svc.Agent.RetrieveVisibleContext(ctx, uid, req.Question, req.MaterialID, 5)
 	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "资料不存在"})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -63,25 +69,26 @@ func (h *Handlers) chat(c *gin.Context) {
 
 	// 调 Agent 流式接口
 	stream, err := h.Svc.Agent.ChatStream(ctx, service.ChatRequest{
-		Question:       req.Question,
-		SessionID:      sessionID,
-		History:        history,
-		VisibleTeamIDs: visible,
-		TopK:           5,
-		Service:        "chat",
-		MaterialID:     req.MaterialID,
+		Question:  req.Question,
+		SessionID: sessionID,
+		History:   history,
+		Chunks:    chunks,
+		Service:   "chat",
 	})
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Agent 服务不可用：" + err.Error()})
 		return
 	}
-	defer func() { _ = stream.Close() }()
+	defer func() { _ = stream.Body.Close() }()
 
 	// SSE 响应头
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	if stream.TraceID != "" {
+		c.Writer.Header().Set("X-Trace-ID", stream.TraceID)
+	}
 	c.Writer.WriteHeader(http.StatusOK)
 
 	flusher, _ := c.Writer.(http.Flusher)
@@ -89,7 +96,7 @@ func (h *Handlers) chat(c *gin.Context) {
 	var answer strings.Builder
 	var citations []service.Citation
 	var promptTokens, completionTokens int
-	scanner := bufio.NewScanner(stream)
+	scanner := bufio.NewScanner(stream.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()

@@ -12,12 +12,14 @@ import (
 
 // Config 应用配置。
 type Config struct {
-	DBDSN        string
-	JWTSecret    string
-	AgentBaseURL string
-	EmbeddingDim int
-	Addr         string
-	UploadDir    string
+	DBDSN                string
+	JWTSecret            string
+	AgentBaseURL         string
+	AgentSharedSecret    string
+	ParseAlertWebhookURL string
+	EmbeddingDim         int
+	Addr                 string
+	UploadDir            string
 }
 
 // Load 加载配置：先尝试读取 .env（若存在），再以环境变量覆盖。
@@ -51,13 +53,23 @@ func Load() *Config {
 		agentBaseURL = "http://localhost:8000"
 	}
 	return &Config{
-		DBDSN:        dbDSN,
-		JWTSecret:    jwtSecret,
-		AgentBaseURL: agentBaseURL,
-		EmbeddingDim: dim,
-		Addr:         addr,
-		UploadDir:    uploadDir,
+		DBDSN:                dbDSN,
+		JWTSecret:            jwtSecret,
+		AgentBaseURL:         agentBaseURL,
+		AgentSharedSecret:    os.Getenv("AGENT_SHARED_SECRET"),
+		ParseAlertWebhookURL: os.Getenv("PARSE_ALERT_WEBHOOK_URL"),
+		EmbeddingDim:         dim,
+		Addr:                 addr,
+		UploadDir:            uploadDir,
 	}
+}
+
+// Validate 校验生产安全所需的必填配置。
+func (c *Config) Validate() error {
+	if c.AgentSharedSecret == "" {
+		return fmt.Errorf("AGENT_SHARED_SECRET is required")
+	}
+	return nil
 }
 
 // DSNFor 返回给 Agent 的连接串（本期 Agent 与后端共用同一库，仅读 material_chunks / 写 chunks）。

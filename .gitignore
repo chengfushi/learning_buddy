@@ -18,6 +18,7 @@ backend/bin/
 frontend/vite.config.js
 frontend/vite.config.d.ts
 frontend/vite.config.js.timestamp-*
+frontend/coverage/
 
 # ---- python ----
 __pycache__/
@@ -27,6 +28,7 @@ venv/
 *.egg-info/
 .ruff_cache/
 .pytest_cache/
+.coverage
 
 # ---- editor / os ----
 .idea/

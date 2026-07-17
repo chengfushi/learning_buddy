@@ -11,20 +11,20 @@
 ## 架构概览 / Architecture
 
 ```
-后端(Go) ──POST /chat (可见 team 集合)──▶ FastAPI
+后端 repository ──可见性过滤+向量检索──▶ 已授权 chunks ──POST /chat──▶ FastAPI
                                             │
                     ┌───────────────────────┼───────────────────────┐
                     ▼                       ▼                       ▼
-              Retriever              Tutor/Planner/Evaluator      Parser
-         (pgvector 向量检索)         (LLM 生成 / Mock 降级)     (切分→嵌入→写库)
+              Embed API              Tutor/Planner/Evaluator      Parser
+          (仅生成查询向量)           (LLM 生成 / Mock 降级)     (切分→嵌入→写库)
                     │                       │                       │
                     └───────────────────────┼───────────────────────┘
                                             ▼
                                    PostgreSQL + pgvector
-                                   (仅持 material_chunks 只读凭证)
+                                   (Parser 最小读写凭证)
 ```
 
-**安全边界（铁律）**：Agent 仅持 `material_chunks` 的只读/解析写凭证；「可见 team 集合 + `shared` 过滤谓词」由后端 repository 计算后通过请求注入，Agent 不自行判定成员/权限。
+**安全边界（铁律）**：资料可见性谓词与 pgvector 检索只存在于 Backend repository；Agent 只生成 query embedding、解析资料并消费后端传入的已授权 chunks，不查询权限表，也不提供 `/retrieve`。
 
 ---
 
@@ -69,6 +69,7 @@ cd agent
 cp .env.example .env
 # 编辑 .env：填入 LLM_API_KEY（DeepSeek）和 EMBEDDING_API_KEY（DashScope）
 # 不填则自动使用本地 Mock 降级（全链路仍可跑通）
+# 生产的 learning_parser 账号由仓库根目录 make provision-parser 创建/授权。
 
 # 2. 安装依赖
 pip install -r requirements.txt
@@ -88,7 +89,7 @@ agent/
 ├── db.py                      # 数据库连接 + pgvector 适配 + 配置管理（Settings）
 ├── embed.py                   # Embedding 生成器（DashScope / 本地哈希降级）
 ├── llm.py                     # LLM 可插拔生成层（DeepSeek / MockLLM 降级）
-├── rag.py                     # RAG 核心：retrieve / parse / run_chat / run_plan / run_quiz
+├── rag.py                     # 解析与生成编排：parse / run_chat / run_plan / run_quiz
 ├── schemas.py                 # Pydantic 请求/响应模型
 ├── conftest.py                # pytest 配置与 fixtures
 ├── pytest.ini                 # pytest 配置
@@ -97,7 +98,7 @@ agent/
 ├── Dockerfile                 # 容器构建
 ├── .env.example               # 环境变量模板
 └── tests/
-    └── test_retrieve.py       # RAG 检索单测 + 集成测试
+    └── test_retrieve.py       # Agent 权限面 + 解析并发幂等测试
 ```
 
 ---
@@ -116,13 +117,17 @@ agent/
 | `EMBEDDING_BASE_URL` | Embedding API 端点 | 阿里云百炼 DashScope 兼容端点 |
 | `EMBEDDING_MODEL` | Embedding 模型名称 | `text-embedding-v4` |
 | `EMBEDDING_DIM` | 向量维度（全库统一） | `1024` |
+| `AGENT_SHARED_SECRET` | Backend→Agent 服务认证共享密钥（必填） | — |
+| `RETRIEVER_TIMEOUT_S` | 答疑查询 Embedding 超时预算（秒） | `0.8` |
+| `PARSER_EMBEDDING_TIMEOUT_S` | 资料解析单个 chunk 的 Embedding 超时（秒） | `30` |
+| `TUTOR_TIMEOUT_S` | 答疑 Tutor 单跳超时预算（秒） | `30` |
 | `PORT` | HTTP 监听端口 | `8000` |
 
 ---
 
 ## API 端点 / API Endpoints
 
-所有端点由后端内部调用（不直接暴露公网）。
+除 `/health` 外，所有端点仅由后端内部调用，必须携带 `X-Agent-Token: <AGENT_SHARED_SECRET>`；密钥缺失或错误返回 HTTP 401。生产部署不向宿主机或公网映射 Agent 端口。
 
 ### 健康检查
 
@@ -148,29 +153,24 @@ agent/
 { "material_id": 1, "chunks": 12, "status": "done" }
 ```
 
-**幂等**：重解析前先删旧 chunks，再写新 chunks（R3）。
+**幂等**：同一资料先获取 PostgreSQL 事务 advisory lock，再校验 Backend 下发的 `parse_generation` 与 `parse_status`，仅当前代次可替换 chunks；数据库唯一索引 `(material_id, chunk_idx)` 提供第二道防线。`parse_status` 仅由 Backend 状态机更新（R3）。
 
-### 向量检索
+### 查询向量化
 
-**`POST /retrieve`** — 在可见 team 集合内做向量检索
+**`POST /embed`** — 为 Backend repository 检索生成查询向量
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `query` | str | ✅ | 检索查询 |
-| `visible_team_ids` | int[] | ✅ | 后端计算的可见 team 集合 |
-| `only_shared_in_teacher` | bool | | teacher team 仅取 `shared=true`，默认 true |
-| `top_k` | int | | 返回 top-k 片段，默认 5（上限 50） |
+| `text` | str | ✅ | 待向量化文本 |
 
 ```json
 // → 200
 {
-  "chunks": [
-    { "team_id": 1, "material_id": 10, "chapter": "第一章", "chunk_idx": 0, "content": "..." }
-  ]
+  "embedding": [0.01, -0.02]
 }
 ```
 
-**安全**：检索谓词使用参数化 SQL（非字符串拼接），且仅在后端授权的 team 集合内过滤 `shared`。
+**安全**：此接口不接受用户、team、shared 或 material ID；所有可见性判断和 top-k 查询都在 Backend repository 完成。
 
 ### AI 对话（SSE 流式）
 
@@ -181,10 +181,8 @@ agent/
 | `question` | str | ✅ | 用户问题 / 目标 / 主题 |
 | `session_id` | str | | 会话 ID |
 | `history` | object[] | | 对话历史 `[{role, content}]` |
-| `visible_team_ids` | int[] | | 可见 team 集合 |
-| `top_k` | int | | 检索片段数，默认 5 |
+| `chunks` | object[] | | Backend repository 已过滤的资料片段 |
 | `service` | str | | `chat`（答疑）/ `plan`（规划）/ `quiz`（测评），默认 `chat` |
-| `material_id` | int | | 限定在某资料内检索（测评用） |
 | `deadline` | str | | 计划截止日期 |
 | `goal` | str | | 计划目标 |
 | `topic` | str | | 测评主题 |
@@ -205,7 +203,7 @@ data: {"type":"done","citations":[...]}
 
 ```json
 // Request
-{ "goal": "两周后考教资", "deadline": "2026-07-26", "visible_team_ids": [1, 2] }
+{ "goal": "两周后考教资", "deadline": "2026-07-26", "chunks": [] }
 
 // → 200
 { "title": "学习计划：两周后考教资", "goal": "...", "deadline": "2026-07-26",
@@ -218,7 +216,7 @@ data: {"type":"done","citations":[...]}
 
 ```json
 // Request
-{ "topic": "牛顿力学", "material_id": 1, "count": 5, "visible_team_ids": [1] }
+{ "topic": "牛顿力学", "count": 5, "chunks": [] }
 
 // → 200
 [
@@ -235,12 +233,13 @@ data: {"type":"done","citations":[...]}
 
 | 维度 | 约束 |
 |------|------|
-| 数据库凭证 | Agent 仅持 `material_chunks` 的读/写权限，不访问 `users` / `team_members` / 密码哈希等 |
-| 权限谓词 | **不自行拼装**——`team_id` 集合与 `shared` 过滤由后端计算后通过请求注入 |
+| 数据库凭证 | Parser 仅需读取资料归属、更新正文并读写 chunks；不访问 `users` / `team_members` / 认证数据 |
+| 权限谓词 | **不自行拼装**——Backend repository 完成可见性过滤和向量检索，只下发 chunks |
 | 参数化查询 | 所有 SQL 使用 `%s` 占位符 + psycopg2 参数绑定，无字符串拼接 |
 | 启动断言 | `assert_embedding_dim()` 校验配置与库表的向量维度一致，不一致则拒绝启动（R1） |
+| 服务认证 | 启动强制要求 `AGENT_SHARED_SECRET`；除 `/health` 外统一校验 `X-Agent-Token`（R5） |
 | 降级安全 | MockLLM 基于召回片段组织回答，不会编造不存在的内容 |
-| 内部调用 | 不暴露公网，由后端做调用方鉴权 |
+| 内部调用 | 生产仅暴露容器内网；本地 Compose 映射 8000 供 R5/E2E 反向验收 |
 
 ---
 
@@ -266,7 +265,8 @@ pytest tests/test_retrieve.py -v
 ## 设计要点 / Design Notes
 
 1. **维度一致性（R1）**：启动时查询 `material_chunks.embedding` 列的 `atttypmod`，与配置的 `EMBEDDING_DIM` 比对，不一致则抛异常阻止启动。
-2. **权限边界（R2）**：`retrieve()` 的检索 SQL 中 `AND (t.type <> 'teacher' OR m.shared = true)` 与后端 repository 的 `VisibleMaterialsScope` 谓词完全一致，但只能缩小范围、不可扩大——team 集合由后端授权。
-3. **幂等解析（R3）**：`parse()` 先 `DELETE` 旧 chunks 再 `INSERT` 新 chunks，重复调用不产生重复数据。
-4. **全链路兜底（R6）**：MockLLM + LocalEmbedder 保证即使没有任何 API Key，答疑/规划/测评全链路仍可本地跑通。
-5. **可插拔设计**：`get_llm()` / `get_embedder()` 根据环境变量自动切换真实模型 / 降级实现，切换零代码改动。
+2. **权限边界（R2）**：Backend repository 先应用 `VisibleMaterialsScope` 再执行 pgvector top-k；指定 `material_id` 也必须进入同一子查询。Agent 没有 `/retrieve` 与权限参数，只消费过滤后的 chunks。
+3. **可靠且幂等的解析（R3）**：Backend 独占 `parse_status` 并为每次入队递增 `parse_generation`；Agent 用 advisory lock 串行化写入，并只接受当前代次且仍为 `parsing` 的请求。唯一索引继续阻止重复 chunk，调度器负责超时、指数退避、恢复、死信与告警。
+4. **服务认证（R5）**：Backend 为所有 Agent 请求注入共享密钥，Agent 使用常量时间比较并默认拒绝无凭证直调；健康检查保持公开。
+5. **超时与降级（R6）**：Backend 为 Embedding + repository 检索设置 800ms 总预算，失败时下发空 chunks；Agent 为 Tutor 设置 30s 预算并可降级到 MockLLM。
+6. **可插拔设计**：`get_llm()` / `get_embedder()` 根据环境变量自动切换真实模型 / 降级实现，切换零代码改动。
