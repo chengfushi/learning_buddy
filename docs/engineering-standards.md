@@ -29,6 +29,12 @@
 | R2 | **RAG 权限谓词被绕过** | 检索谓词 `team_id IN(可见集) AND (teams.type<>'teacher' OR materials.shared=true)` 正确，但若重构时有人在 Agent/前端重拼，或漏掉 `shared` | 学生读到老师备课草稿（越权） | ① 谓词**只**在后端 repository 构建，Agent 仅收「过滤后的片段」；② 加**反向测试用例**：学生查询必须断言不包含 `shared=false` 的 teacher 资料；③ Code Review 清单强制卡（见 §2.3） | 安全测试红 / 绿驱动；任何越权路径有测试覆盖 |
 | R3 | **解析队列不可靠** | `parse_status` 异步（`pending→parsing→done/failed`），worker 崩溃会卡在 `parsing`；重解析可能重复 chunk | 资料「一直在解析中」，知识库缺数据 | ① 解析任务设超时 + 失败重入队（指数退避）；② **幂等**：重解析先删旧 chunk 再写；③ 死信队列 + 告警；④ `failed` 前端可重试 | 模拟 worker 崩溃 → 任务自动恢复；重复触发不产生重复 chunk |
 
+> R1 进展（2026-07-15）：后端通过 `format_type`、Agent 通过 pgvector 直接记录维度的 `pg_attribute.atttypmod` 做启动断言；已补 `vector(1024)` 正向与真实不匹配反向测试，避免误减 PostgreSQL 通用 varlena 的 4 字节头。
+
+> R2 完成（2026-07-15）：chat/plan/quiz 的可见性谓词与 pgvector top-k 均收口 Backend repository，Agent `/retrieve` 已移除，只接收已过滤 chunks。指定 `material_id` 也先进入统一可见性校验，不可见与不存在均返回 404。反向测试覆盖未审批/非成员、`shared=false`、猜 ID 的详情/笔记/测评越权，以及“成员引用 > 0、非成员引用 = 0”。
+
+> R3 完成（2026-07-15）：Backend repository 独占 `materials.parse_status` 状态机并完成条件抢占、启动恢复、补偿扫描、120 秒单次超时、3 次指数退避、死信、告警与显式重试。Agent 不再回写状态；解析事务用 material 级 advisory lock 串行化超时后仍运行的旧请求与重试，并由 `(material_id, chunk_idx)` 唯一索引兜底，避免重复 chunk 与迟到状态覆盖。恢复、并发幂等和告警均有自动化测试。
+
 ### P1（MVP 后尽快补，影响稳定性/安全）
 
 | # | 风险 | 现象 / 根因 | 影响 | 对策 | 验收 |
@@ -38,6 +44,16 @@
 | R6 | **多智能体链路无超时/降级** | 答疑链路顺序调用 Retriever→Tutor，任一环慢则整体慢，无兜底 | 单次问答超时、雪崩 | ① 每跳设超时预算（如 Retriever 800ms）；② Retriever 失败**降级为无 RAG** 直接答；③ 每 agent 独立 trace | 注入 Retriever 故障 → 仍返回（降级）答案；P99 可控 |
 | R7 | **缓存失效覆盖不全** | `team:visible:{user_id}` 在 `shared` 翻转 / 成员审批时失效，但任一遗漏的写路径都会脏读 | 学生最多 5 分钟看到草稿或漏看新公开资料 | ① 失效逻辑**集中**在 repository 的写方法内，不散落业务层；② 对「可见集」计算加集成测试 | 改 `shared` / 审批成员后，立即可见性生效（测试断言） |
 | R8 | **缺测试策略** | 文档未定义测试分层 | 权限回归无防护，重构即碎 | 见 §2.4：单测（谓词）+ 集成（完整 RAG 权限流）+ 契约（后端↔Agent） | 三层测试在 CI 跑通，覆盖率达标 |
+
+> R4 完成（2026-07-15）：SSE 对话统一使用 `fetch + ReadableStream`，access token 仅放入 `Authorization: Bearer` Header，URL 不携带 token；前端单测硬断言请求 URL/Header，E2E 反向断言 query token 无法通过后端鉴权（HTTP 401）。
+
+> R5 完成（2026-07-15）：Backend→Agent 所有业务请求统一携带环境变量 `AGENT_SHARED_SECRET` 对应的 `X-Agent-Token`，Agent 使用常量时间比较并 fail-closed；`/health` 保持公开，其余入口对缺失/错误凭证返回 HTTP 401。生产只暴露 Agent 容器内网；本地 Compose 映射 8000 供 E2E 断言无凭证直调被拒。
+
+> R6 完成（2026-07-15）：Backend 对 Embedding + repository 检索设置 `0.8s` 总预算，异常或超时降级为空 chunks；Agent 对 Tutor 设置 `30s` 预算并在失败时降级到本地 MockLLM。SSE 返回 `X-Trace-ID`；故障与 Tutor 降级有自动化测试。
+
+> R7 当前实现已闭环（2026-07-15）：Go Backend 尚未实例化 Redis 客户端，可见 team 与资料范围每次都由 repository 直接查询 PostgreSQL，不存在缓存脏读窗口。集成测试覆盖“成员审批后立即进入可见集”以及 teacher 资料 `shared=false→true→false` 每次翻转后的即时正反向可见性。未来引入 `team:visible:*` 缓存前，必须先在 repository 写方法内集中实现失效并保留这些测试。
+
+> R8 进展（2026-07-15）：已新增 PostgreSQL/pgvector 驱动的 GitHub Actions，CI 执行三栈 lint/单测/build、共享 Backend↔Agent 契约、完整 E2E 与 R2；测试策略和覆盖率纪律见 `docs/testing.md`。当前生产代码口径实测 Backend 32.1%（认证/RBAC middleware 100%，JWT 解析与注册均 ≥ 90%，认证及 Learning HTTP 主路径已覆盖）、Agent 74.74%、Frontend 93.23% statements / 92.59% branches / 73.14% functions / 93.23% lines（所有页面 statements/lines 均 100%）；Agent 已启用 70% 硬门禁，Frontend 已启用四维 70% 硬门禁，Backend 未达标，因此 R8 暂不标记完成。
 
 ### P2（规模化阶段）
 

@@ -77,6 +77,7 @@
 | `storage_key` | VARCHAR(512) | 对象存储键（MinIO/S3） |
 | `parse_status` | VARCHAR(20) DEFAULT `pending` | `pending` / `parsing` / `done` / `failed` |
 | `parse_error` | VARCHAR(512) | 解析失败原因 |
+| `parse_generation` | BIGINT DEFAULT `1` | 每次重新入队递增；Backend/Agent 以此拒绝陈旧 worker 完成或写入 |
 | `shared` | BOOLEAN DEFAULT false | **仅 `teacher` team 生效**：是否对 team 学生成员可见 |
 | `owner_id` | BIGINT | FK → `users(id)` |
 | `created_at` | TIMESTAMPTZ | DEFAULT now() |
@@ -90,12 +91,13 @@
 | `id` | BIGSERIAL | PK |
 | `team_id` | BIGINT | FK → `teams(id)`（知识库归属，检索时按可见 team 过滤） |
 | `material_id` | BIGINT | FK → `materials(id)` |
-| `chunk_idx` | INT | 片段序号 |
+| `chunk_idx` | INT | 片段序号；与 `material_id` 组成唯一索引，保证解析重试幂等 |
 | `content` | TEXT | 片段文本 |
-| `embedding` | vector(`<DIM>`) | 维度由 embedding 模型决定（Gemini 768 / 3072），经 `EMBEDDING_DIM` 注入 |
+| `embedding` | vector(1024) | 当前由 `EMBEDDING_DIM=1024` 与启动断言统一；变更维度必须新增迁移 |
 
 索引：
 - `idx_chunk_team(team_id)`
+- `uq_material_chunks_material_idx(material_id, chunk_idx)`（唯一）
 - `idx_chunk_vec`：`USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)`
 
 > **维度一致性**：全库必须统一维度，启动时断言与库表一致；建库前先 `CREATE EXTENSION IF NOT EXISTS vector;`。
@@ -139,6 +141,7 @@
 | exercises | 类型 | 说明 |
 |------|------|------|
 | `id` | BIGSERIAL | PK |
+| `user_id` | BIGINT NOT NULL | FK → `users(id)`；题目所有者 |
 | `material_id` | BIGINT | FK → `materials(id)` |
 | `session_id` | UUID | FK → `agent_sessions(id)` |
 | `question` | TEXT NOT NULL | 题目 |
@@ -156,7 +159,7 @@
 | `score` | NUMERIC(5,2) | 得分 |
 | `created_at` | TIMESTAMPTZ | DEFAULT now() |
 
-索引：`idx_qa_user(user_id)`。
+索引：`idx_exercises_user(user_id)`、`idx_qa_user(user_id)`。
 
 ### 2.9 study_plans（学习计划，Planner）
 
@@ -216,14 +219,19 @@ users ──< token_usage
 
 ## 4. 团队知识库检索谓词（权限隔离在检索层生效）
 
-RAG 向量检索时，后端先算「用户可见 team 集合」，再下发如下谓词（**谓词只在后端 repository 层构建**）：
+RAG 向量检索时，Backend repository 先计算「用户可见 team 集合」，再在同一数据库查询中直接执行如下谓词；谓词不会下发给 Agent：
 
 ```sql
 team_id IN (可见 team 集合)
-AND (teams.type <> 'teacher' OR materials.shared = true)
+AND (
+  teams.owner_id = :user_id
+  OR teams.type <> 'teacher'
+  OR materials.shared = true
+)
 ```
 
-- 可见集合 = 私人 team + 已 `approved` 加入的 teacher team + 公共库（`type='public'`，特判不查 `team_members`）。
+- 可见集合 = 自己拥有的私人/teacher team + 已 `approved` 加入的 teacher team + 公共库（`type='public'`，特判不查 `team_members`）。
+- team owner 可读取自己团队中的全部资料；其他用户读取 teacher team 时必须同时满足成员已审批且 `shared=true`。
 - `teacher` team 中 `shared=false` 的备课草稿**绝不会被学生召回**。
 - 任何权限改动（翻转 `shared`、成员审批）后，主动删除 `team:visible:{user_id}` 缓存（见 §5）。
 

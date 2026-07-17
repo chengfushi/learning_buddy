@@ -1,61 +1,24 @@
-"""RAG 检索 / 解析 / 编排（Retriever + Parser + Tutor/Planner/Evaluator）。
+"""资料解析与生成编排。
 
-权限边界（engineering-standards §0 / R2，system-design §7.4）：
-- 可见 team 集合由后端 repository 计算并通过请求下发，Agent 不自行判定成员/权限。
-- 检索谓词 `team_id IN(可见集) AND (type<>'teacher' OR shared)` 与后端
-  repository.VisibleMaterialsScope 完全一致；team 集合由后端授权，Agent 只能在
-  该集合内做 material 级 shared  refinement，无法扩大可见范围 → 学生读不到
-  teacher 未共享草稿（R2 反向测试覆盖）。
+权限边界（engineering-standards §0 / R2）：向量检索及可见性过滤全部由 Backend
+repository 完成；Agent 只消费后端传入的已授权 chunks，永远不查询权限表或拼谓词。
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
+import time
 
 from pgvector import Vector
 
-from db import get_conn
-from embed import get_embedder
-from llm import ChunkView, get_llm
+from db import get_conn, settings
+from embed import embed_text
+from llm import ChunkView, MockLLM, get_llm
+from schemas import PlanResult, QuizResult
 
-_embedder = get_embedder()
-
-
-def retrieve(
-    query: str,
-    visible_team_ids: list[int] | None,
-    only_shared_in_teacher: bool = True,
-    top_k: int = 5,
-) -> list[ChunkView]:
-    """在后端授权的可见 team 集合内做向量检索（余弦最近邻）。"""
-    visible = [int(t) for t in (visible_team_ids or [])]
-    if not visible:
-        return []
-    top_k = max(1, min(top_k or 5, 50))
-    q_emb = _embedder.embed(query)
-
-    sql = """
-        SELECT c.team_id, c.material_id, m.chapter, c.chunk_idx, c.content,
-               1 - (c.embedding <=> %s) AS score
-        FROM material_chunks c
-        JOIN materials m ON m.id = c.material_id
-        JOIN teams t ON t.id = m.team_id
-        WHERE m.team_id = ANY(%s)
-          AND (%s OR t.type <> 'teacher' OR m.shared = true)
-        ORDER BY c.embedding <=> %s
-        LIMIT %s
-    """
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                sql,
-                (Vector(q_emb), visible, not only_shared_in_teacher, Vector(q_emb), top_k),
-            )
-            rows = cur.fetchall()
-    return [
-        ChunkView(team_id=r[0], material_id=r[1], chapter=r[2] or "", chunk_idx=r[3], content=r[4])
-        for r in rows
-    ]
+logger = logging.getLogger("agent.rag")
 
 
 def _chunk_text(text: str, size: int = 600, overlap: int = 80) -> list[str]:
@@ -83,39 +46,138 @@ def _chunk_text(text: str, size: int = 600, overlap: int = 80) -> list[str]:
     return [c for c in final if c.strip()]
 
 
-def parse(material_id: int, content: str, file_type: str, storage_key: str) -> dict:
-    """Parser 任务：切分 → 嵌入 → 幂等写 chunks → 回填 materials（R3 幂等）。"""
+def _stale_parse_response(
+    material_id: int,
+    request_generation: int,
+    current_generation: int,
+    parse_status: str,
+) -> dict:
+    logger.info(
+        "ignored stale material parse write",
+        extra={
+            "material_id": material_id,
+            "request_generation": request_generation,
+            "current_generation": current_generation,
+            "parse_status": parse_status,
+        },
+    )
+    return {"material_id": material_id, "chunks": 0, "status": "stale"}
+
+
+def parse(
+    material_id: int,
+    parse_generation: int,
+    content: str,
+    file_type: str,
+    storage_key: str,
+) -> dict:
+    """Parser 任务：仅在 Backend 当前解析代次仍有效时原子替换 chunks。"""
+    del file_type, storage_key
+    # 先做无锁预检，避免已知陈旧请求继续消耗远程 Embedding 配额；写入前仍会在锁内复检。
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT team_id FROM materials WHERE id = %s", (material_id,))
+            cur.execute(
+                "SELECT parse_generation, parse_status FROM materials WHERE id = %s",
+                (material_id,),
+            )
             row = cur.fetchone()
             if not row:
                 raise ValueError(f"material {material_id} not found")
-            team_id = row[0]
+            current_generation, parse_status = row
+            if current_generation != parse_generation or parse_status != "parsing":
+                return _stale_parse_response(
+                    material_id,
+                    parse_generation,
+                    current_generation,
+                    parse_status,
+                )
 
-            chunks = _chunk_text(content)
+    chunks = _chunk_text(content)
+    embedded_chunks = [
+        (piece, embed_text(piece, timeout_s=settings.parser_embedding_timeout_s))
+        for piece in chunks
+    ]
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            # HTTP 超时不会终止 FastAPI 的同步线程。advisory lock 串行化同资料写入，
+            # 行锁 + parse_generation/status 阻止超时旧请求覆盖新任务或失败终态。
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (material_id,))
+            cur.execute(
+                "SELECT team_id, parse_generation, parse_status "
+                "FROM materials WHERE id = %s FOR UPDATE",
+                (material_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"material {material_id} not found")
+            team_id, current_generation, parse_status = row
+            if current_generation != parse_generation or parse_status != "parsing":
+                return _stale_parse_response(
+                    material_id,
+                    parse_generation,
+                    current_generation,
+                    parse_status,
+                )
+
             # 幂等：重解析先删旧 chunk，避免重复（R3）
             cur.execute("DELETE FROM material_chunks WHERE material_id = %s", (material_id,))
-            for idx, piece in enumerate(chunks):
-                emb = _embedder.embed(piece)
+            for idx, (piece, embedding) in enumerate(embedded_chunks):
                 cur.execute(
                     """INSERT INTO material_chunks (team_id, material_id, chunk_idx, content, embedding)
                        VALUES (%s, %s, %s, %s, %s)""",
-                    (team_id, material_id, idx, piece, Vector(emb)),
+                    (team_id, material_id, idx, piece, Vector(embedding)),
                 )
             cur.execute(
                 """UPDATE materials
-                   SET content = %s, parse_status = 'done', parse_error = NULL
-                   WHERE id = %s""",
-                (content, material_id),
+                   SET content = %s
+                   WHERE id = %s AND parse_generation = %s AND parse_status = 'parsing'""",
+                (content, material_id, parse_generation),
             )
     return {"material_id": material_id, "chunks": len(chunks), "status": "done"}
 
 
-def run_chat(question: str, visible_team_ids, top_k: int, history=None) -> tuple[str, list[dict]]:
-    chunks = retrieve(question, visible_team_ids, top_k, True)
+def run_chat(question: str, chunks: list[ChunkView], history=None) -> tuple[str, list[dict]]:
     answer = get_llm().chat(question, chunks, history)
-    citations = [
+    return answer, _citations(chunks)
+
+
+async def run_chat_resilient(
+    question: str,
+    chunks: list[ChunkView],
+    history: object = None,
+    trace_id: str = "",
+) -> tuple[str, list[dict]]:
+    """按 Tutor 独立预算生成；检索超时降级已由 Backend 在权限过滤后处理。"""
+    llm = get_llm()
+    tutor_started = time.monotonic()
+    try:
+        answer = await asyncio.wait_for(
+            asyncio.to_thread(llm.chat, question, chunks, history),
+            timeout=max(0.001, settings.tutor_timeout_s),
+        )
+        logger.info(
+            "tutor completed",
+            extra={
+                "trace_id": trace_id,
+                "duration_ms": round((time.monotonic() - tutor_started) * 1000, 2),
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "tutor degraded to local mock",
+            extra={
+                "trace_id": trace_id,
+                "duration_ms": round((time.monotonic() - tutor_started) * 1000, 2),
+                "error_type": type(exc).__name__,
+            },
+        )
+        answer = MockLLM().chat(question, chunks, history)
+    return answer, _citations(chunks)
+
+
+def _citations(chunks: list[ChunkView]) -> list[dict]:
+    return [
         {
             "team_id": c.team_id,
             "material_id": c.material_id,
@@ -125,35 +187,22 @@ def run_chat(question: str, visible_team_ids, top_k: int, history=None) -> tuple
         }
         for c in chunks
     ]
-    return answer, citations
 
 
-def run_plan(goal: str, deadline: str | None, visible_team_ids) -> dict:
-    chunks = retrieve(goal, visible_team_ids, 5, True)
-    return get_llm().plan(goal, deadline, chunks)
+def run_plan(goal: str, deadline: str | None, chunks: list[ChunkView]) -> dict:
+    try:
+        result = get_llm().plan(goal, deadline, chunks)
+        return PlanResult.model_validate(result).model_dump()
+    except Exception as exc:
+        logger.warning("planner degraded to local mock", extra={"error_type": type(exc).__name__})
+        return MockLLM().plan(goal, deadline, chunks)
 
 
-def run_quiz(topic: str, count: int, material_id: int | None, visible_team_ids) -> list[dict]:
-    if material_id:
-        # 限定在该资料内检索
-        chunks = _retrieve_in_material(topic, material_id, count + 2)
-    else:
-        chunks = retrieve(topic, visible_team_ids, count + 2, True)
-    return get_llm().quiz(topic, count, chunks)
-
-
-def _retrieve_in_material(query: str, material_id: int, top_k: int) -> list[ChunkView]:
-    q_emb = _embedder.embed(query)
-    sql = """
-        SELECT c.team_id, c.material_id, m.chapter, c.chunk_idx, c.content
-        FROM material_chunks c
-        JOIN materials m ON m.id = c.material_id
-        WHERE c.material_id = %s
-        ORDER BY c.embedding <=> %s
-        LIMIT %s
-    """
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (material_id, Vector(q_emb), top_k))
-            rows = cur.fetchall()
-    return [ChunkView(r[0], r[1], r[2] or "", r[3], r[4]) for r in rows]
+def run_quiz(topic: str, count: int, chunks: list[ChunkView]) -> list[dict]:
+    try:
+        result = get_llm().quiz(topic, count, chunks)
+        validated = QuizResult.model_validate(result)
+        return [item.model_dump() for item in validated.root]
+    except Exception as exc:
+        logger.warning("evaluator degraded to local mock", extra={"error_type": type(exc).__name__})
+        return MockLLM().quiz(topic, count, chunks)

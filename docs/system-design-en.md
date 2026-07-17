@@ -1,7 +1,7 @@
 # AI Learning Companion · System Design Document
 
 > Version: v0.3 · Status: Design Draft (Revised) · Last Updated: 2026-07-11
-> Changelog: v0.3 fixes from requirements review — RAG adds `shared` mandatory filter, Agent read-only credentials, class code + approval status, file/parse state machine, embedding dimension configuration, four missing tables (exercises/quiz_attempts/study_plans/user_profiles/token_usage), subscription tier linked to rate limiting, K12 content safety, roadmap reorder
+> Changelog: v0.4 centralizes material visibility and pgvector top-k in the Backend repository. Agent generation consumes only authorized chunks, while Parser uses least-privilege read/write credentials. It also completes class-code approval, the parse state machine, and embedding-dimension assertions.
 
 ---
 
@@ -52,22 +52,22 @@ The system organizes materials and permissions around the concept of **"Team = K
 ┌───────────────────────────▼─────────────────────────────────┐
 │        Backend Layer  (Go + Gin) — Business & Data Gateway   │
 │  Auth/AuthZ │ Team&RBAC │ Material CRUD │ Learning Records   │
-│  · Computes "visible team set" → passes to Agent for filter  │
+│  · Repository auth filter + pgvector top-k → authorized chunks│
 └──────┬──────────────────────┬───────────────────┬───────────┘
        │                      │                   │
        ▼                      ▼                   ▼
 ┌──────────────┐     ┌────────────────┐   ┌──────────────────────┐
 │ PostgreSQL   │     │   Redis 7      │   │  Agent Layer (Python)  │
 │ + pgvector   │     │ Session/Hot/RL │   │  Google ADK + A2A      │
-│ teams/mat/vec│     │               │   │  Orchestrator+Retriever │
+│ teams/mat/vec│     │               │   │  Orchestrator+Parser    │
 └──────────────┘     └────────────────┘   │  +Tutor+Planner+Eval   │
                                           └──────────┬───────────┘
                                                      │ A2A (HTTP/JSON)
                                           ┌──────────▼───────────┐
-                                          │ Retriever searches    │
-                                          │ within "visible team   │
-                                          │ set + shared predicate"│
-                                          │ pgvector (read-only)   │
+                                          │ Parser writes current  │
+                                          │ generation chunks; all │
+                                          │ generation consumes    │
+                                          │ authorized chunks only │
                                           └──────────────────────┘
 ```
 
@@ -76,8 +76,8 @@ The system organizes materials and permissions around the concept of **"Team = K
 | Layer | Responsibility | NOT Responsible For |
 |-------|---------------|---------------------|
 | Frontend | Interaction, state, rendering, calling backend APIs | Business logic, data storage, model inference |
-| Backend | Authentication, Team/RBAC, Material CRUD, computing visible team set, Agent request proxy | Model inference, vector retrieval implementation |
-| Agent | Intent understanding, material parsing, RAG, multi-agent collaboration, answer generation | User system, material permission decisions (backend gatekeeps) |
+| Backend | Authentication, Team/RBAC, Material CRUD, visibility filtering, pgvector retrieval, Agent proxy | Model inference |
+| Agent | Intent understanding, material parsing, multi-agent collaboration, generation from authorized chunks | User system, permission decisions, vector retrieval |
 | Data | Persistence, vector retrieval, caching | Business logic |
 
 ---
@@ -113,7 +113,7 @@ The system organizes materials and permissions around the concept of **"Team = K
 
 ### 5.3 AI-Assisted Learning Mode
 
-- **Smart Q&A**: Select text / entire page to ask, Agent answers based on RAG across multiple knowledge bases in the "visible team set", with citations (source team / material).
+- **Smart Q&A**: The Backend repository performs RAG inside the user's authorized scope, then the Agent answers only from the filtered chunks and returns source citations.
 - **Study Planning**: Planner Agent generates plans by goal and deadline.
 - **Smart Assessment**: Evaluator Agent generates quizzes and grades them.
 - **Conversational Companion**: Multi-turn dialogue, context memory, browsable conversation history.
@@ -141,8 +141,8 @@ handler (Gin) → service (business/RBAC/team) → repository (GORM) → Postgre
                                   ↘ agent client (calls Agent service)
 ```
 
-- **Middleware**: JWT authentication, RBAC validation, visible team computation, rate limiting, logging/tracing.
-- **Agent Client**: Encapsulates HTTP calls to Agent, with timeout, retry, SSE stream forwarding; carries "user visible team set" in requests.
+- **Middleware**: JWT authentication, RBAC validation, rate limiting, and logging/tracing. Material visibility and pgvector retrieval are centralized in the repository.
+- **Agent Client**: Encapsulates HTTP calls to Agent, with timeout, retry, and SSE forwarding; generation requests contain only repository-filtered chunks, never permission predicates.
 
 ### 6.2 Permission Model (RBAC) & Team
 
@@ -170,14 +170,14 @@ The system has three roles, with permissions and material ownership bounded by "
 
 - Example permission points: `material:read`, `material:write`, `team:create`, `team:manage`, `team:approve`, `user:manage`, `agent:chat`.
 - Data isolation: Learning records and conversation history are row-isolated by `user_id`; materials controlled by `team_id` + `shared` visibility.
-- Key rule: **Each team is a knowledge base**; retrieval is strictly limited to the "user visible team set", and teacher teams only retrieve `shared=true` materials.
+- Key rule: **Each team is a knowledge base**; reads are strictly limited to the "user visible team set". Owners may manage drafts in their own teacher teams; other users must be `approved` members and the material must have `shared=true`. Detail, team-list, and note endpoints reuse the same repository scope.
 
 ### 6.3 Team & Knowledge Base
 
 - **Teacher Team (Study Group)**: Created by teacher (generates `join_code`), members are students; only teacher can upload materials; each material has a `shared` toggle — when on, `approved` students can see it; when off, only the teacher sees it (prep/draft).
 - **Student Private Team**: Auto-generated per student at registration; materials uploaded by the student are visible only to themselves.
 - **Public Library**: System-level team (`type='public'`) maintained by super admin; materials visible platform-wide; does not write to `team_members`, handled as special case in visibility computation.
-- **Knowledge Base Essence**: A team is the logical container for materials and vectors. After upload, the Agent performs structural parsing (chunking, extracting chapters/knowledge points, generating embeddings) and writes into that team's `material_chunks`; RAG retrieval only fetches chunks within the "user visible team set", and teacher teams only fetch `shared=true`, naturally enforcing permission isolation.
+- **Knowledge Base Essence**: A team is the logical container for materials and vectors. After upload, the Agent Parser structurally parses and embeds content, writing `material_chunks` through a least-privilege database role. For Q&A, planning, and quizzes, the Backend repository owns both visibility filtering and pgvector top-k; the Agent consumes only authorized chunks.
 - **Parse Automation**: After `POST /api/materials` succeeds, the backend **asynchronously** triggers the Parser task (file lands in object storage → enqueued → parsed → chunks written → `parse_status` updated); `parse_status` is `pending/parsing/done/failed`, shown by the frontend as progress.
 
 ### 6.4 Core Modules
@@ -189,7 +189,7 @@ The system has three roles, with permissions and material ownership bounded by "
 | User | User profile, role, subscription status |
 | Material | Material CRUD (belongs to team), `shared` visibility, triggers parsing |
 | Learning | Learning records, exercise scores, progress aggregation |
-| Agent Gateway | Proxies Agent requests, injects user context & "visible team set" |
+| Agent Gateway | Retrieves authorized chunks through the repository, proxies Agent generation, and forwards SSE |
 
 ### 6.5 API Design (REST Summary)
 
@@ -208,15 +208,16 @@ The system has three roles, with permissions and material ownership bounded by "
 | GET | `/api/materials` | Material list (filtered by visible teams) | Yes |
 | GET | `/api/materials/:id` | Material detail (includes `parse_status`) | Yes |
 | PUT | `/api/materials/:id` | Update material / toggle `shared` (change triggers re-parse) | Yes |
+| POST | `/api/materials/:id/retry` | Retry a `failed` parse task (requires team write access) | Yes |
 | DELETE | `/api/materials/:id` | Delete material (cascade deletes chunks) | Yes |
 | GET | `/api/learning/records` | My learning records | Yes |
 | POST | `/api/learning/exercise` | Submit exercise | Yes |
-| POST | `/api/agent/chat` | AI conversation (SSE streaming, retrieves visible teams + `shared`) | Yes |
+| POST | `/api/agent/chat` | AI conversation (Backend retrieves authorized chunks, Agent streams generation) | Yes |
 | POST | `/api/agent/plan` | Generate study plan (writes `study_plans`) | Yes |
 | POST | `/api/agent/quiz` | Generate quiz (writes `exercises`) | Yes |
 | GET | `/api/agent/sessions` | My session list | Yes |
 
-> All write endpoints are RBAC-constrained; `/api/agent/*` endpoints have the backend inject `user_id`, subscription tier, and "visible team set + `shared` filter predicate" into Agent requests. The Agent does not directly read permission tables — it only holds **read-only** credentials for `material_chunks` to perform retrieval.
+> All write endpoints are RBAC-constrained. Backend repository applies the canonical visibility predicate and pgvector top-k before sending authorized chunks to Agent. Agent Parser holds only the minimum database privileges needed for parsing and cannot read user, membership, or authentication tables.
 
 ---
 
@@ -228,9 +229,9 @@ Uses an **Orchestrator + Specialized Agent** pattern, with agents collaborating 
 
 | Agent | Responsibility |
 |-------|---------------|
-| **Orchestrator** | Receives backend requests (with visible team set), classifies intent, decomposes sub-tasks, routes and aggregates |
+| **Orchestrator** | Receives backend requests with repository-filtered chunks, classifies intent, routes and aggregates |
 | **Parser** | Structural material parsing: chunking, extracting chapters/knowledge points, generating embeddings, writing to the corresponding team |
-| **Retriever** | Vector retrieval within the "visible team set", reranking, returning material chunks |
+| **Backend Retriever** | Applies the repository visibility scope before pgvector top-k and returns authorized chunks |
 | **Tutor** | Q&A tutoring: generates accessible explanations based on retrieved chunks + conversation history, with citations (team/material/chapter) |
 | **Planner** | Study planning: generates structured plans by goal/deadline/level |
 | **Evaluator** | Assessment & grading: generates questions, scores, provides weak-point suggestions |
@@ -239,29 +240,31 @@ Uses an **Orchestrator + Specialized Agent** pattern, with agents collaborating 
 ### 7.2 A2A Interaction Example (Q&A)
 
 ```
-Backend ──POST /agent/chat (visible team set)──▶ Orchestrator
-Orchestrator ──A2A task──▶ Retriever   (returns top-k within that team set only)
+Backend repository ──visibility scope + pgvector top-k──▶ authorized chunks
+Backend ──POST /agent/chat (chunks)──▶ Orchestrator
 Orchestrator ──A2A task──▶ Tutor       (chunks + question + history → answer)
 Orchestrator ──SSE stream──▶ Backend ──▶ Frontend
 ```
 
 ### 7.3 RAG Flow
 
-1. Question (+ current material context) → Embedding.
-2. Approximate search within the "visible team set" in `material_chunks`.
+1. Backend calls Agent `/embed` for the query embedding (within the 800ms retrieval budget).
+2. Backend repository searches `material_chunks` only through `VisibleMaterialsScope`; optional `material_id` uses the same scope.
 3. Rerank → assemble into prompt.
 4. LLM generates answer, outputs citations (team / material / chapter).
 5. New Q&A written to conversation history (Redis short-term + PostgreSQL long-term).
+
+> **R6 timeouts and fallback**: Backend gives embedding plus repository retrieval an `800ms` total budget and falls back to empty chunks; Agent gives Tutor a `30s` budget and falls back to the local MockLLM. SSE returns `X-Trace-ID` for correlation.
 
 ### 7.4 Context & Memory
 
 - **Short-term Context**: Current conversation turns stored in Redis (configurable TTL).
 - **Long-term Memory**: User profile, weak points, preferences stored in PostgreSQL.
-- **Security**: Agent only holds read-only credentials for `material_chunks`; the retrieval predicate (visible team set + teacher team `shared=true` only) is computed by the backend and passed down — the Agent cannot directly access the full database or permission tables.
+- **Security**: visibility predicates and vector SQL exist only in Backend repository. Agent exposes no `/retrieve` route and receives only authorized chunks; Parser credentials must not access user, membership, or authentication data.
 
 ### 7.5 Material Structural Parsing & Team Knowledge Base
 
-- Any material (teacher team / student private team / public library) upon upload triggers the backend to **asynchronously** invoke the Agent's **Parser task**: file lands in object storage → chunking → structure extraction → embedding generation → write to that team's `material_chunks` (updating `parse_status`).
+- Backend repository is the sole owner of the durable `materials.parse_status` state machine and increments `parse_generation` for every requeue. Worker completion and Agent chunk replacement must match the current generation; Agent also serializes writes with `pg_advisory_xact_lock(material_id)` and requires the status to remain `parsing`. Late requests therefore cannot overwrite newer content or terminal state, while the unique `(material_id, chunk_idx)` index prevents duplicate chunks.
 - At retrieval time, the backend computes the **effective retrieval predicate** based on user identity: `team_id IN (visible set) AND (teams.type <> 'teacher' OR materials.shared = true)`, and vector retrieval is performed only within that predicate — teacher team drafts (`shared=false`) can never be recalled by students.
 - Student private team materials are also parsed into their private knowledge base, enabling AI Q&A to draw from "their own materials."
 
@@ -317,6 +320,7 @@ CREATE TABLE materials (
   storage_key VARCHAR(512),                 -- object storage key (MinIO/S3)
   parse_status VARCHAR(20) DEFAULT 'pending', -- pending/parsing/done/failed
   parse_error VARCHAR(512),
+  parse_generation BIGINT DEFAULT 1,          -- incremented on requeue; rejects stale workers
   shared      BOOLEAN DEFAULT false,        -- only effective for teacher teams: visible to team student members
   owner_id    BIGINT REFERENCES users(id),
   created_at  TIMESTAMPTZ DEFAULT now()
@@ -355,9 +359,11 @@ CREATE TABLE agent_messages (
 -- Quiz Questions & Attempts (Evaluator)
 CREATE TABLE exercises (
   id          BIGSERIAL PRIMARY KEY,
+  user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   material_id BIGINT REFERENCES materials(id),
   session_id  UUID REFERENCES agent_sessions(id),
   question    TEXT NOT NULL,
+  options     JSONB,
   answer_key  TEXT,
   difficulty  VARCHAR(20),
   created_at  TIMESTAMPTZ DEFAULT now()
@@ -424,7 +430,7 @@ CREATE TABLE material_chunks (
 CREATE INDEX idx_chunk_team ON material_chunks(team_id);
 CREATE INDEX idx_chunk_vec ON material_chunks
   USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
--- Retrieval predicate (backend passes down): team_id IN (visible set) AND (teams.type <> 'teacher' OR materials.shared = true)
+-- Retrieval predicate (executed directly by Backend repository): team_id IN (visible set) AND (teams.type <> 'teacher' OR materials.shared = true)
 ```
 
 ### 8.3 Redis Caching Strategy
@@ -439,13 +445,15 @@ CREATE INDEX idx_chunk_vec ON material_chunks
 
 > **Cache Invalidation**: When `material.shared` is toggled, or `team_members` are added/removed/status changed, actively delete `team:visible:{user_id}` and `user:profile:{user_id}` to prevent students from seeing drafts or missing newly public materials within the 5-minute window.
 
+> **Current implementation (R7)**: These Redis keys remain a target design. The Go backend does not currently cache visibility; every visibility query uses the repository and PostgreSQL as the source of truth, so shared toggles and member approvals take effect on the next query. Before enabling the cache, invalidation must be centralized in repository write methods and continue to pass the immediate-visibility integration tests.
+
 ---
 
 ## 9. Security Design
 
-- **Authentication**: JWT (access + refresh); refresh token uses **httpOnly + Secure Cookie** (preferred over localStorage, XSS-resistant); SSE streaming conversations pass access token via handshake first frame or query parameter (since `EventSource` cannot set custom headers).
+- **Authentication**: JWT (access + refresh). SSE streaming conversations must use `fetch + ReadableStream`; the access token is carried only in the `Authorization: Bearer` header. `EventSource` and URL query tokens are forbidden so credentials never enter access logs.
 - **Authorization**: RBAC + team visibility + row-level isolation; material visibility enforced at repository layer, with teacher teams only returning `shared=true`.
-- **Agent Boundary**: Backend passes "visible team set + `shared` filter predicate" to Agent; Agent holds only **read-only** DB role for `material_chunks`, cannot directly access permission tables or the full database.
+- **Agent Boundary**: Backend repository performs authorization and vector retrieval, then passes only authorized chunks to Agent. Every business request must include `X-Agent-Token`; Agent compares it in constant time and rejects unauthenticated calls by default. Agent cannot access user, membership, or authentication data.
 - **Transport**: Site-wide HTTPS; SSE/WebSocket also authenticated.
 - **Content Safety**: K12 scenarios apply content moderation gateway (keyword + model guardrails) on both user input and model output to prevent inappropriate content.
 - **Rate Limiting**: Agent conversations rate-limited per user.
@@ -465,7 +473,7 @@ docker-compose:
 ```
 
 - Frontend static assets served by Nginx, API proxied to backend.
-- Backend and Agent communicate internally; Agent not exposed to public internet.
+- Backend and Agent communicate only on the container network. Agent has no host port mapping and is not exposed publicly; both services receive the same `AGENT_SHARED_SECRET` from the runtime environment.
 - Optional K8s: backend/agent independently HPA-scalable.
 
 ---

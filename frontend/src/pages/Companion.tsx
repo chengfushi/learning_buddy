@@ -12,69 +12,110 @@ export default function Companion({ materialId }: { materialId?: number }) {
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
 
   const [goal, setGoal] = useState("");
   const [deadline, setDeadline] = useState("");
   const [plan, setPlan] = useState<StudyPlan | null>(null);
+  const [planBusy, setPlanBusy] = useState(false);
 
   const [topic, setTopic] = useState("");
   const [count, setCount] = useState(3);
   const [exercises, setExercises] = useState<Exercise[]>([]);
   const [results, setResults] = useState<Record<number, boolean>>({});
+  const [quizBusy, setQuizBusy] = useState(false);
+  const [answeringId, setAnsweringId] = useState<number | null>(null);
 
   const ask = async () => {
     const q = input.trim();
     if (!q || busy) return;
     setInput("");
     setBusy(true);
+    setErr("");
     setMessages((m) => [...m, { role: "user", content: q }, { role: "assistant", content: "" }]);
     let acc = "";
-    await api.chatStream(
-      { question: q, material_id: materialId },
-      {
-        onToken: (t) => {
-          acc += t;
-          setMessages((m) => {
-            const copy = [...m];
-            copy[copy.length - 1] = { role: "assistant", content: acc };
-            return copy;
-          });
+    try {
+      await api.chatStream(
+        { question: q, material_id: materialId },
+        {
+          onToken: (t) => {
+            acc += t;
+            setMessages((m) => {
+              const copy = [...m];
+              copy[copy.length - 1] = { role: "assistant", content: acc };
+              return copy;
+            });
+          },
+          onCitations: (c) =>
+            setMessages((m) => {
+              const copy = [...m];
+              copy[copy.length - 1] = { ...copy[copy.length - 1], citations: c };
+              return copy;
+            }),
+          onEnd: () => setBusy(false),
+          onError: (msg) => {
+            setMessages((m) => {
+              const copy = [...m];
+              copy[copy.length - 1] = { role: "assistant", content: `出错了：${msg}` };
+              return copy;
+            });
+            setBusy(false);
+          },
         },
-        onCitations: (c) =>
-          setMessages((m) => {
-            const copy = [...m];
-            copy[copy.length - 1] = { ...copy[copy.length - 1], citations: c };
-            return copy;
-          }),
-        onEnd: () => setBusy(false),
-        onError: (msg) => {
-          setMessages((m) => {
-            const copy = [...m];
-            copy[copy.length - 1] = { role: "assistant", content: `出错了：${msg}` };
-            return copy;
-          });
-          setBusy(false);
-        },
-      },
-    );
+      );
+    } catch (ex) {
+      const message = ex instanceof Error ? ex.message : "对话请求失败";
+      setMessages((m) => {
+        const copy = [...m];
+        copy[copy.length - 1] = { role: "assistant", content: `出错了：${message}` };
+        return copy;
+      });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const genPlan = async () => {
-    if (!goal.trim()) return;
-    const r = await api.createPlan(goal, deadline || undefined);
-    setPlan(r.plan);
+    if (!goal.trim() || planBusy) return;
+    setErr("");
+    setPlanBusy(true);
+    try {
+      const r = await api.createPlan(goal, deadline || undefined);
+      setPlan(r.plan);
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "计划生成失败");
+    } finally {
+      setPlanBusy(false);
+    }
   };
 
   const genQuiz = async () => {
-    if (!topic.trim()) return;
-    const r = await api.createQuiz(topic, count, materialId);
-    setExercises(r.exercises);
-    setResults({});
+    if (!topic.trim() || quizBusy) return;
+    setErr("");
+    setQuizBusy(true);
+    try {
+      const r = await api.createQuiz(topic, count, materialId);
+      setExercises(r.exercises);
+      setResults({});
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "测评生成失败");
+    } finally {
+      setQuizBusy(false);
+    }
   };
 
   const answer = async (ex: Exercise, choice: string) => {
-    const r = await api.answerQuiz(ex.ID, choice);
-    setResults((prev) => ({ ...prev, [ex.ID]: r.is_correct }));
+    if (answeringId !== null || results[ex.ID] !== undefined) return;
+    setErr("");
+    setAnsweringId(ex.ID);
+    try {
+      const r = await api.answerQuiz(ex.ID, choice);
+      setResults((prev) => ({ ...prev, [ex.ID]: r.is_correct }));
+    } catch (error) {
+      setErr(error instanceof Error ? error.message : "答案提交失败");
+    } finally {
+      setAnsweringId(null);
+    }
   };
 
   return (
@@ -90,6 +131,7 @@ export default function Companion({ materialId }: { materialId?: number }) {
           智能测评
         </button>
       </div>
+      {err && <div className="err">{err}</div>}
 
       {tab === "chat" && (
         <div className="chat">
@@ -135,8 +177,8 @@ export default function Companion({ materialId }: { materialId?: number }) {
               onChange={(e) => setGoal(e.target.value)}
             />
             <input type="date" value={deadline} onChange={(e) => setDeadline(e.target.value)} />
-            <button className="primary" onClick={genPlan}>
-              生成学习计划
+            <button className="primary" onClick={genPlan} disabled={planBusy}>
+              {planBusy ? "生成中…" : "生成学习计划"}
             </button>
           </div>
           {plan && (
@@ -169,8 +211,8 @@ export default function Companion({ materialId }: { materialId?: number }) {
               value={count}
               onChange={(e) => setCount(Number(e.target.value))}
             />
-            <button className="primary" onClick={genQuiz}>
-              生成测评
+            <button className="primary" onClick={genQuiz} disabled={quizBusy}>
+              {quizBusy ? "生成中…" : "生成测评"}
             </button>
           </div>
           {exercises.map((ex) => (
@@ -181,8 +223,8 @@ export default function Companion({ materialId }: { materialId?: number }) {
                   <button
                     key={i}
                     className={results[ex.ID] !== undefined ? "opt done" : "opt"}
-                    onClick={() => answer(ex, opt)}
-                    disabled={results[ex.ID] !== undefined}
+                    onClick={() => answer(ex, String.fromCharCode("A".charCodeAt(0) + i))}
+                    disabled={answeringId !== null || results[ex.ID] !== undefined}
                   >
                     {opt}
                   </button>

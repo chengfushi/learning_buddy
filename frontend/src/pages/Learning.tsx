@@ -7,17 +7,28 @@ export default function Learning() {
   const [duration, setDuration] = useState(10);
   const [progress, setProgress] = useState(0);
   const [score, setScore] = useState("");
+  const [loadingSummary, setLoadingSummary] = useState(true);
+  const [loadingRecords, setLoadingRecords] = useState(true);
   const [err, setErr] = useState("");
+  const [recordsErr, setRecordsErr] = useState("");
 
   const load = () => {
+    setSummary(null);
+    setRecords([]);
+    setLoadingSummary(true);
+    setLoadingRecords(true);
+    setErr("");
+    setRecordsErr("");
     api
       .getProgress()
       .then((r) => setSummary(r.summary))
-      .catch((e) => setErr(e instanceof Error ? e.message : "加载失败"));
+      .catch((e) => setErr(e instanceof Error ? e.message : "加载失败"))
+      .finally(() => setLoadingSummary(false));
     api
       .listLearningRecords()
       .then((r) => setRecords(r.records))
-      .catch(() => undefined);
+      .catch((e) => setRecordsErr(e instanceof Error ? e.message : "学习记录加载失败"))
+      .finally(() => setLoadingRecords(false));
   };
   useEffect(() => {
     load();
@@ -28,7 +39,7 @@ export default function Learning() {
     setErr("");
     try {
       await api.createLearningRecord({
-        duration_s: duration,
+        duration_s: duration * 60,
         progress,
         score: score === "" ? undefined : Number(score),
       });
@@ -45,24 +56,28 @@ export default function Learning() {
       <h2>学习中心</h2>
       {err && <div className="err">{err}</div>}
 
-      <div className="stats">
-        <div className="stat">
-          <div className="num">{summary ? Math.round(summary.total_duration_s / 60) : 0}</div>
-          <div className="muted small">学习分钟</div>
+      {loadingSummary ? (
+        <div className="muted small">正在加载学习统计…</div>
+      ) : summary ? (
+        <div className="stats">
+          <div className="stat">
+            <div className="num">{Math.round(summary.total_duration_s / 60)}</div>
+            <div className="muted small">学习分钟</div>
+          </div>
+          <div className="stat">
+            <div className="num">{Math.round(summary.avg_progress)}%</div>
+            <div className="muted small">平均完成度</div>
+          </div>
+          <div className="stat">
+            <div className="num">{summary.quiz_count}</div>
+            <div className="muted small">测评次数</div>
+          </div>
+          <div className="stat">
+            <div className="num">{Math.round(summary.quiz_accuracy)}%</div>
+            <div className="muted small">测评正确率</div>
+          </div>
         </div>
-        <div className="stat">
-          <div className="num">{summary ? Math.round(summary.avg_progress) : 0}%</div>
-          <div className="muted small">平均完成度</div>
-        </div>
-        <div className="stat">
-          <div className="num">{summary ? summary.quiz_count : 0}</div>
-          <div className="muted small">测评次数</div>
-        </div>
-        <div className="stat">
-          <div className="num">{summary ? Math.round(summary.quiz_accuracy) : 0}%</div>
-          <div className="muted small">测评正确率</div>
-        </div>
-      </div>
+      ) : null}
 
       <form className="card form" onSubmit={record}>
         <h3>记录本次学习</h3>
@@ -102,17 +117,25 @@ export default function Learning() {
 
       <div className="card">
         <h3>近期记录</h3>
+        {recordsErr && <div className="err">{recordsErr}</div>}
         <ul className="list">
-          {records.map((r) => (
-            <li key={r.ID} className="row">
-              <span>
-                {r.CreatedAt.slice(0, 10)} · {r.DurationS} 分钟 · 完成度 {Math.round(r.Progress)}%
-                {r.Score != null ? ` · 得分 ${Math.round(r.Score)}` : ""}
-              </span>
-            </li>
-          ))}
-          {records.length === 0 && (
-            <li className="muted small">还没有学习记录，去资料里学一会吧。</li>
+          {loadingRecords ? (
+            <li className="muted small">正在加载学习记录…</li>
+          ) : (
+            <>
+              {records.map((r) => (
+                <li key={r.ID} className="row">
+                  <span>
+                    {r.CreatedAt.slice(0, 10)} · {Math.round(r.DurationS / 60)} 分钟 · 完成度{" "}
+                    {Math.round(r.Progress)}%
+                    {r.Score != null ? ` · 得分 ${Math.round(r.Score)}` : ""}
+                  </span>
+                </li>
+              ))}
+              {records.length === 0 && (
+                <li className="muted small">还没有学习记录，去资料里学一会吧。</li>
+              )}
+            </>
           )}
         </ul>
       </div>

@@ -14,6 +14,7 @@ import (
 
 	"learning_buddy/backend/internal/middleware"
 	"learning_buddy/backend/internal/model"
+	"learning_buddy/backend/internal/repository"
 	"learning_buddy/backend/internal/service"
 )
 
@@ -37,7 +38,7 @@ func (h *Handlers) listMaterials(c *gin.Context) {
 			limit = int(n)
 		}
 	}
-	items, err := h.Svc.Repos.ListVisibleMaterials(c.Request.Context(), visible, teamID, q, limit)
+	items, err := h.Svc.Repos.ListVisibleMaterials(c.Request.Context(), uid, visible, teamID, q, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -112,24 +113,25 @@ func writeMaterialErr(c *gin.Context, err error) {
 
 func (h *Handlers) getMaterial(c *gin.Context) {
 	uid := middleware.CtxUserID(c)
-	role := middleware.CtxRole(c)
 	id, err := bindID(c, "id")
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效资料"})
 		return
 	}
-	m, err := h.Svc.Repos.GetMaterial(c.Request.Context(), id)
+	m, err := h.Svc.Repos.GetVisibleMaterial(c.Request.Context(), uid, id)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "资料不存在"})
-		return
-	}
-	// 可见性校验
-	ok, err := h.materialVisible(c, uid, role, m)
-	if err != nil || !ok {
-		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该资料"})
+		writeMaterialReadErr(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"material": m})
+}
+
+func writeMaterialReadErr(c *gin.Context, err error) {
+	if errors.Is(err, repository.ErrNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "资料不存在"})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": "读取资料失败"})
 }
 
 func (h *Handlers) updateMaterial(c *gin.Context) {
@@ -180,29 +182,27 @@ func (h *Handlers) deleteMaterial(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-// materialVisible 判断当前用户能否查看该资料（权限在 repository 层原则下，此处做视图级校验）。
-func (h *Handlers) materialVisible(c *gin.Context, uid int64, role string, m *model.Material) (bool, error) {
-	team, err := h.Svc.Repos.GetTeam(c.Request.Context(), m.TeamID)
+func (h *Handlers) retryMaterialParse(c *gin.Context) {
+	uid := middleware.CtxUserID(c)
+	role := middleware.CtxRole(c)
+	id, err := bindID(c, "id")
 	if err != nil {
-		return false, err
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效资料"})
+		return
 	}
-	if role == "super_admin" {
-		return true, nil
-	}
-	if team.Type == "private" && team.OwnerID != nil && *team.OwnerID == uid {
-		return true, nil
-	}
-	if team.Type == "teacher" {
-		// owner 可见全部；学生仅可见 shared
-		if team.OwnerID != nil && *team.OwnerID == uid {
-			return true, nil
+	m, err := h.Svc.Materials.RetryParse(c.Request.Context(), uid, role, id)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrForbidden):
+			c.JSON(http.StatusForbidden, gin.H{"error": "无权重试该资料"})
+		case errors.Is(err, service.ErrMaterialParseNotFailed):
+			c.JSON(http.StatusConflict, gin.H{"error": "仅解析失败的资料可重试"})
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		}
-		return m.Shared, nil
+		return
 	}
-	if team.Type == "public" {
-		return true, nil
-	}
-	return false, nil
+	c.JSON(http.StatusAccepted, gin.H{"material": m})
 }
 
 // buildCreateInput 组装资料创建入参（兼容 JSON / 表单 / 文件上传）。

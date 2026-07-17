@@ -16,9 +16,9 @@ func (h *Handlers) listNotes(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效资料"})
 		return
 	}
-	notes, err := h.Svc.Repos.ListNotes(c.Request.Context(), uid, materialID)
+	notes, err := h.Svc.Repos.ListNotesForVisibleMaterial(c.Request.Context(), uid, materialID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		writeMaterialReadErr(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"notes": notes})
@@ -47,8 +47,8 @@ func (h *Handlers) createNote(c *gin.Context) {
 		Content:    req.Content,
 		Quote:      req.Quote,
 	}
-	if err := h.Svc.Repos.CreateNote(c.Request.Context(), n); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	if err := h.Svc.Repos.CreateNoteForVisibleMaterial(c.Request.Context(), n); err != nil {
+		writeMaterialReadErr(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"note": n})

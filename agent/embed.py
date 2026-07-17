@@ -5,7 +5,7 @@
 - 维度恒定 = EMBEDDING_DIM，满足 engineering-standards R1（维度一致性）；
 - 同一文本永远得到同一向量，解析与检索可复现。
 
-若设置 EMBEDDING_PROVIDER=openai 且 LLM_API_KEY 非空，则走 OpenAI 兼容嵌入接口
+若设置 EMBEDDING_PROVIDER=openai 且 EMBEDDING_API_KEY 非空，则走 OpenAI 兼容嵌入接口
 （维度仍需与库表一致，由调用方保证）。
 """
 
@@ -21,7 +21,7 @@ from db import settings
 
 
 class Embedder:
-    def embed(self, text: str) -> list[float]:
+    def embed(self, text: str, timeout_s: float | None = None) -> list[float]:
         raise NotImplementedError
 
     def dim(self) -> int:
@@ -46,7 +46,8 @@ class LocalEmbedder(Embedder):
         digest = hashlib.md5(f"{self._seed}:{token}".encode()).digest()
         return int.from_bytes(digest[:4], "big") % self._dim
 
-    def embed(self, text: str) -> list[float]:
+    def embed(self, text: str, timeout_s: float | None = None) -> list[float]:
+        del timeout_s
         vec = np.zeros(self._dim, dtype=np.float32)
         for tok in self._tokens(text):
             vec[self._hash_idx(tok)] += 1.0
@@ -59,7 +60,10 @@ class LocalEmbedder(Embedder):
 class OpenAIEmbedder(Embedder):
     """OpenAI 兼容嵌入（可选，默认不启用）。维度须与库表一致。"""
 
-    def embed(self, text: str) -> list[float]:
+    def embed(self, text: str, timeout_s: float | None = None) -> list[float]:
+        effective_timeout = (
+            timeout_s if timeout_s is not None else settings.parser_embedding_timeout_s
+        )
         resp = httpx.post(
             f"{settings.embedding_base_url.rstrip('/')}/embeddings",
             headers={"Authorization": f"Bearer {settings.embedding_api_key}"},
@@ -68,7 +72,7 @@ class OpenAIEmbedder(Embedder):
                 "input": text,
                 "dimensions": settings.embedding_dim,
             },
-            timeout=30,
+            timeout=effective_timeout,
         )
         resp.raise_for_status()
         return resp.json()["data"][0]["embedding"]
@@ -78,3 +82,11 @@ def get_embedder() -> Embedder:
     if settings.embedding_provider == "openai" and settings.embedding_api_key:
         return OpenAIEmbedder()
     return LocalEmbedder()
+
+
+_embedder = get_embedder()
+
+
+def embed_text(text: str, timeout_s: float | None = None) -> list[float]:
+    """统一文本向量化入口；调用方按查询或解析路径传入独立超时预算。"""
+    return _embedder.embed(text, timeout_s)

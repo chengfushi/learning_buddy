@@ -139,10 +139,20 @@ func (h *Handlers) listTeamMaterials(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效团队"})
 		return
 	}
-	items, err := h.Svc.Repos.ListTeamMaterials(c.Request.Context(), teamID, uid, role)
+	items, err := h.Svc.Repos.ListTeamMaterials(c.Request.Context(), teamID, uid)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"materials": items})
+	team, err := h.Svc.Repos.GetTeam(c.Request.Context(), teamID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	canWrite, err := h.Svc.Repos.CanWriteToTeam(c.Request.Context(), uid, role, team)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"materials": items, "can_write": canWrite})
 }

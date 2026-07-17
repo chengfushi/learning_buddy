@@ -1,0 +1,106 @@
+{
+  "parse": {
+    "request": {
+      "material_id": 42,
+      "parse_generation": 7,
+      "content": "contract material",
+      "file_type": "txt",
+      "storage_key": "contracts/42.txt"
+    },
+    "response": {
+      "material_id": 42,
+      "chunks": 1,
+      "status": "done"
+    }
+  },
+  "embed": {
+    "request": {
+      "text": "contract query"
+    },
+    "response": {
+      "embedding": [0.1, 0.2]
+    }
+  },
+  "chat": {
+    "request": {
+      "question": "contract question",
+      "session_id": "00000000-0000-0000-0000-000000000042",
+      "history": [
+        {
+          "role": "user",
+          "content": "previous question"
+        }
+      ],
+      "chunks": [
+        {
+          "team_id": 7,
+          "material_id": 42,
+          "chapter": "Contract",
+          "chunk_idx": 0,
+          "content": "contract chunk"
+        }
+      ],
+      "service": "chat"
+    },
+    "response": {
+      "answer": "contract answer",
+      "citations": [
+        {
+          "team_id": 7,
+          "material_id": 42,
+          "chapter": "Contract",
+          "chunk_idx": 0
+        }
+      ]
+    }
+  },
+  "plan": {
+    "request": {
+      "goal": "contract goal",
+      "deadline": "2026-12-31",
+      "chunks": [
+        {
+          "team_id": 7,
+          "material_id": 42,
+          "chapter": "Contract",
+          "chunk_idx": 0,
+          "content": "contract chunk"
+        }
+      ]
+    },
+    "response": {
+      "title": "Contract Plan",
+      "goal": "contract goal",
+      "items": [
+        {
+          "date": "D1",
+          "task": "contract task",
+          "done": false
+        }
+      ]
+    }
+  },
+  "quiz": {
+    "request": {
+      "topic": "contract topic",
+      "count": 1,
+      "chunks": [
+        {
+          "team_id": 7,
+          "material_id": 42,
+          "chapter": "Contract",
+          "chunk_idx": 0,
+          "content": "contract chunk"
+        }
+      ]
+    },
+    "response": [
+      {
+        "question": "contract question",
+        "options": ["A", "B", "C", "D"],
+        "answer_key": "A",
+        "difficulty": "medium"
+      }
+    ]
+  }
+}

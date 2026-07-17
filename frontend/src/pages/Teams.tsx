@@ -9,13 +9,17 @@ export default function Teams() {
   const [joinCode, setJoinCode] = useState("");
   const [manageId, setManageId] = useState<number | null>(null);
   const [members, setMembers] = useState<TeamMember[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingMembers, setLoadingMembers] = useState(false);
   const [err, setErr] = useState("");
 
   const load = () => {
+    setLoading(true);
     api
       .listTeams()
       .then((r) => setTeams(r.teams))
-      .catch((e) => setErr(e instanceof Error ? e.message : "加载失败"));
+      .catch((e) => setErr(e instanceof Error ? e.message : "加载失败"))
+      .finally(() => setLoading(false));
   };
   useEffect(() => {
     load();
@@ -48,10 +52,14 @@ export default function Teams() {
 
   const manage = (id: number) => {
     setManageId(id);
+    setMembers([]);
+    setLoadingMembers(true);
+    setErr("");
     api
       .listMembers(id)
       .then((r) => setMembers(r.members))
-      .catch((e) => setErr(e instanceof Error ? e.message : "加载成员失败"));
+      .catch((e) => setErr(e instanceof Error ? e.message : "加载成员失败"))
+      .finally(() => setLoadingMembers(false));
   };
 
   const approve = async (uid: number) => {
@@ -102,43 +110,55 @@ export default function Teams() {
       )}
 
       <div className="grid">
-        {teams.map((t) => (
-          <div key={t.ID} className="card">
-            <div className="title">{t.Name}</div>
-            <div className="muted small">
-              <em className="tag">{t.Type}</em>
-            </div>
-            {isOwner(t) && t.JoinCode && (
-              <div className="code">
-                班级码：<b>{t.JoinCode}</b>
+        {loading ? (
+          <div className="muted small">正在加载团队…</div>
+        ) : teams.length === 0 ? (
+          <div className="muted small">还没有团队或知识库。</div>
+        ) : (
+          teams.map((t) => (
+            <div key={t.ID} className="card">
+              <div className="title">{t.Name}</div>
+              <div className="muted small">
+                <em className="tag">{t.Type}</em>
               </div>
-            )}
-            {isOwner(t) && (
-              <button className="ghost" onClick={() => manage(t.ID)}>
-                管理成员 / 审批
-              </button>
-            )}
-          </div>
-        ))}
+              {isOwner(t) && t.JoinCode && (
+                <div className="code">
+                  班级码：<b>{t.JoinCode}</b>
+                </div>
+              )}
+              {isOwner(t) && (
+                <button className="ghost" onClick={() => manage(t.ID)}>
+                  管理成员 / 审批
+                </button>
+              )}
+            </div>
+          ))
+        )}
       </div>
 
       {manageId !== null && (
         <div className="card">
           <h3>成员审批</h3>
           <ul className="list">
-            {members.map((m) => (
-              <li key={m.UserID} className="row">
-                <span>
-                  用户 #{m.UserID} · 状态：<b>{m.Status}</b>
-                </span>
-                {m.Status === "pending" && (
-                  <button className="primary" onClick={() => approve(m.UserID)}>
-                    通过
-                  </button>
-                )}
-              </li>
-            ))}
-            {members.length === 0 && <li className="muted small">暂无成员。</li>}
+            {loadingMembers ? (
+              <li className="muted small">正在加载成员…</li>
+            ) : (
+              <>
+                {members.map((m) => (
+                  <li key={m.UserID} className="row">
+                    <span>
+                      用户 #{m.UserID} · 状态：<b>{m.Status}</b>
+                    </span>
+                    {m.Status === "pending" && (
+                      <button className="primary" onClick={() => approve(m.UserID)}>
+                        通过
+                      </button>
+                    )}
+                  </li>
+                ))}
+                {members.length === 0 && <li className="muted small">暂无成员。</li>}
+              </>
+            )}
           </ul>
           <button className="ghost" onClick={() => setManageId(null)}>
             关闭

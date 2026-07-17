@@ -22,6 +22,9 @@ func openTestDB(t *testing.T) *gorm.DB {
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
 	return db
 }
 
@@ -64,7 +67,7 @@ func TestVisibleMaterialsScope_R2(t *testing.T) {
 	assert.Contains(t, visible, team.ID, "已审批加入的 teacher team 应在可见集合内")
 
 	// 在可见集合内列出资料
-	mats, err := repo.ListVisibleMaterials(ctx, visible, nil, "", 100)
+	mats, err := repo.ListVisibleMaterials(ctx, student.ID, visible, nil, "", 100)
 	require.NoError(t, err)
 
 	gotIDs := make([]int64, 0, len(mats))
@@ -75,7 +78,7 @@ func TestVisibleMaterialsScope_R2(t *testing.T) {
 	assert.Contains(t, gotIDs, open.ID, "对学生公开的资料应可见")
 
 	// 反向：以 teacher（owner）身份查看自己团队，应同时看到草稿与公开
-	tmats, err := repo.ListTeamMaterials(ctx, team.ID, teacher.ID, "teacher")
+	tmats, err := repo.ListTeamMaterials(ctx, team.ID, teacher.ID)
 	require.NoError(t, err)
 	var tIDs []int64
 	for _, m := range tmats {
@@ -85,7 +88,7 @@ func TestVisibleMaterialsScope_R2(t *testing.T) {
 	assert.Contains(t, tIDs, open.ID, "老师本人应能看到自己公开的资料")
 }
 
-// TestListTeamMaterials_OwnerVsStudent 验证单 team 视图下的 shared 过滤。
+// TestListTeamMaterials_OwnerVsStudent 验证单 team 视图同时强制成员关系与 shared 过滤。
 func TestListTeamMaterials_OwnerVsStudent(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
@@ -106,17 +109,82 @@ func TestListTeamMaterials_OwnerVsStudent(t *testing.T) {
 	open := model.Material{TeamID: team.ID, Title: "公开", Shared: true, OwnerID: teacher.ID}
 	require.NoError(t, tx.Create(&open).Error)
 
-	// 学生视角（未加入）
-	stuMats, err := repo.ListTeamMaterials(ctx, team.ID, student.ID, "student")
+	// 学生视角（未加入）绝不可仅凭 team ID 读取 shared 资料。
+	stuMats, err := repo.ListTeamMaterials(ctx, team.ID, student.ID)
 	require.NoError(t, err)
-	assert.Len(t, stuMats, 1, "未加入的学生在 teacher team 只能看到 1 条公开资料")
+	assert.Empty(t, stuMats, "未加入的学生看不到 teacher team 的任何资料")
+
+	// approved 成员仅可见 shared=true。
+	require.NoError(t, tx.Create(&model.TeamMember{TeamID: team.ID, UserID: student.ID, Status: "approved"}).Error)
+	stuMats, err = repo.ListTeamMaterials(ctx, team.ID, student.ID)
+	require.NoError(t, err)
+	require.Len(t, stuMats, 1)
 	assert.Equal(t, open.ID, stuMats[0].ID)
 
 	// 老师（owner）视角
 	var dbgCnt int64
 	tx.Model(&model.Material{}).Where("team_id = ?", team.ID).Count(&dbgCnt)
 	t.Logf("DEBUG teacher.ID=%d team.ID=%d draft.ID=%d open.ID=%d cnt=%d", teacher.ID, team.ID, draft.ID, open.ID, dbgCnt)
-	teaMats, err := repo.ListTeamMaterials(ctx, team.ID, teacher.ID, "teacher")
+	teaMats, err := repo.ListTeamMaterials(ctx, team.ID, teacher.ID)
 	require.NoError(t, err)
 	assert.Len(t, teaMats, 2, "老师本人能看到全部 2 条资料（含草稿）")
+
+	// 详情查询与列表共用同一 repository scope。
+	gotOpen, err := repo.GetVisibleMaterial(ctx, student.ID, open.ID)
+	require.NoError(t, err)
+	assert.Equal(t, open.ID, gotOpen.ID)
+	_, err = repo.GetVisibleMaterial(ctx, student.ID, draft.ID)
+	assert.ErrorIs(t, err, ErrNotFound)
+	gotDraft, err := repo.GetVisibleMaterial(ctx, teacher.ID, draft.ID)
+	require.NoError(t, err)
+	assert.Equal(t, draft.ID, gotDraft.ID)
+}
+
+// TestRetrieveVisibleChunks_R2 验证所有 RAG 入口最终使用 repository 的统一可见性子查询。
+func TestRetrieveVisibleChunks_R2(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	tx := db.Begin()
+	require.NoError(t, tx.Error)
+	defer tx.Rollback()
+	repo := New(tx)
+
+	suffix := uuid.NewString()[:8]
+	student := model.User{Email: "rag_stu_" + suffix + "@t.dev", Role: "student"}
+	require.NoError(t, tx.Create(&student).Error)
+	outsider := model.User{Email: "rag_out_" + suffix + "@t.dev", Role: "student"}
+	require.NoError(t, tx.Create(&outsider).Error)
+	teacher := model.User{Email: "rag_tea_" + suffix + "@t.dev", Role: "teacher"}
+	require.NoError(t, tx.Create(&teacher).Error)
+	team := model.Team{Name: "RAG" + suffix, Type: "teacher", OwnerID: &teacher.ID}
+	require.NoError(t, tx.Create(&team).Error)
+	draft := model.Material{TeamID: team.ID, Title: "秘密草稿", Shared: false, OwnerID: teacher.ID}
+	require.NoError(t, tx.Create(&draft).Error)
+	shared := model.Material{TeamID: team.ID, Title: "共享讲义", Shared: true, OwnerID: teacher.ID}
+	require.NoError(t, tx.Create(&shared).Error)
+	require.NoError(t, tx.Create(&model.TeamMember{
+		TeamID: team.ID, UserID: student.ID, Status: "approved",
+	}).Error)
+
+	embedding := make([]float64, 1024)
+	embedding[0] = 1
+	for materialID, content := range map[int64]string{draft.ID: "秘密", shared.ID: "共享"} {
+		require.NoError(t, tx.Exec(
+			"INSERT INTO material_chunks (team_id, material_id, chunk_idx, content, embedding) "+
+				"VALUES (?, ?, 0, ?, ?::vector)",
+			team.ID, materialID, content, vectorLiteral(embedding),
+		).Error)
+	}
+
+	studentChunks, err := repo.RetrieveVisibleChunks(ctx, student.ID, embedding, nil, 5)
+	require.NoError(t, err)
+	require.Len(t, studentChunks, 1)
+	assert.Equal(t, shared.ID, studentChunks[0].MaterialID)
+
+	outsiderChunks, err := repo.RetrieveVisibleChunks(ctx, outsider.ID, embedding, &shared.ID, 5)
+	require.NoError(t, err)
+	assert.Empty(t, outsiderChunks, "非成员不能通过指定 material_id 召回共享资料")
+
+	_, err = repo.GetVisibleMaterial(ctx, outsider.ID, shared.ID)
+	assert.ErrorIs(t, err, ErrNotFound)
 }

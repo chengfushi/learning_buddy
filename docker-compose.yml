@@ -47,6 +47,7 @@ services:
       DB_DSN: postgres://learning:learning@db:5432/learning_buddy?sslmode=disable
       REDIS_ADDR: redis:6379
       AGENT_BASE_URL: http://agent:8000
+      AGENT_SHARED_SECRET: ${AGENT_SHARED_SECRET:?AGENT_SHARED_SECRET must be set}
       MINIO_ENDPOINT: minio:9000
       MINIO_BUCKET: materials
     ports:
@@ -60,11 +61,12 @@ services:
   agent:
     build: ./agent
     environment:
-      PG_DSN: postgres://learning_ro:learning@db:5432/learning_buddy
+      PG_DSN: postgres://learning:learning@db:5432/learning_buddy
       REDIS_ADDR: redis:6379
-      EMBEDDING_DIM: "768"
+      EMBEDDING_DIM: "1024"
+      AGENT_SHARED_SECRET: ${AGENT_SHARED_SECRET:?AGENT_SHARED_SECRET must be set}
     ports:
-      - "8000:8000"
+      - "8000:8000" # 仅本地验收；生产部署应仅暴露容器内网
     depends_on:
       db:
         condition: service_healthy

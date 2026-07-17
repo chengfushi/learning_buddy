@@ -20,12 +20,12 @@ type Services struct {
 }
 
 func New(repos *repository.Repositories, cfg *config.Config) *Services {
-	agent := NewAgentService(cfg)
+	agent := NewAgentService(cfg, repos)
 	return &Services{
 		Repos:        repos,
 		Auth:         NewAuthService(repos, cfg),
 		Teams:        NewTeamService(repos),
-		Materials:    NewMaterialService(repos, cfg, agent),
+		Materials:    NewMaterialService(repos, agent, cfg.ParseAlertWebhookURL),
 		Learning:     NewLearningService(repos),
 		Conversation: NewConversationService(repos),
 		Agent:        agent,

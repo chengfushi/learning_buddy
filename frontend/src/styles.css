@@ -180,6 +180,11 @@ textarea {
   color: var(--muted);
   font-size: 20px;
 }
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
 /* 登录 */
 .auth-wrap {
