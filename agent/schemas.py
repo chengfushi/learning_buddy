@@ -22,6 +22,14 @@ class ParseRequest(BaseModel):
     storage_key: str = ""
 
 
+class AssetResult(BaseModel):
+    id: int
+    page_number: int | None = None
+    storage_key: str
+    caption: str = ""
+    ocr_text: str = ""
+
+
 class EmbedRequest(BaseModel):
     text: str
 
@@ -36,6 +44,12 @@ class ChunkInput(BaseModel):
     chapter: str = ""
     chunk_idx: int
     content: str
+    chunk_id: int | None = None
+    title: str = ""
+    kind: str = "body"
+    page_number: int | None = None
+    score: float = 0.0
+    asset_id: int | None = None
 
 
 class ChatHistory(BaseModel):
@@ -53,6 +67,45 @@ class ChatRequest(BaseModel):
     count: int = 3
     goal: str | None = None
     topic: str | None = None
+    retrieval_query: str = ""
+
+
+class QueryAnalysisRequest(BaseModel):
+    question: str = Field(min_length=1)
+    history: list[ChatHistory] = []
+
+
+class QueryAnalysisResponse(BaseModel):
+    retrieval_query: str = Field(min_length=1)
+    keywords: list[str] = []
+    embedding: list[float] = []
+    rewrite_applied: bool = False
+    model: str = "local"
+
+
+class RerankCandidate(BaseModel):
+    chunk_id: int
+    material_id: int
+    content: str
+    title: str = ""
+    kind: str = "body"
+
+
+class RerankRequest(BaseModel):
+    query: str = Field(min_length=1)
+    candidates: Annotated[list[RerankCandidate], Field(max_length=20)] = []
+    top_n: int = Field(default=8, ge=1, le=20)
+
+
+class RerankItem(BaseModel):
+    chunk_id: int
+    score: float
+
+
+class RerankResponse(BaseModel):
+    items: list[RerankItem]
+    model: str
+    degraded: bool = False
 
 
 class PlanRequest(BaseModel):

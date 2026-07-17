@@ -12,17 +12,35 @@ import re
 import httpx
 
 from db import settings
+from pipeline import redact_for_cloud
 
 
 class ChunkView:
     def __init__(
-        self, team_id: int, material_id: int, chapter: str, chunk_idx: int, content: str
+        self,
+        team_id: int,
+        material_id: int,
+        chapter: str,
+        chunk_idx: int,
+        content: str,
+        chunk_id: int | None = None,
+        title: str = "",
+        kind: str = "body",
+        page_number: int | None = None,
+        score: float = 0.0,
+        asset_id: int | None = None,
     ) -> None:
         self.team_id = team_id
         self.material_id = material_id
         self.chapter = chapter
         self.chunk_idx = chunk_idx
         self.content = content
+        self.chunk_id = chunk_id
+        self.title = title
+        self.kind = kind
+        self.page_number = page_number
+        self.score = score
+        self.asset_id = asset_id
 
 
 class LLM:
@@ -113,7 +131,7 @@ class OpenAILLM(LLM):
                 "model": settings.llm_model,
                 "messages": [
                     {"role": "system", "content": system},
-                    {"role": "user", "content": user},
+                    {"role": "user", "content": redact_for_cloud(user)},
                 ],
                 "temperature": 0.3,
             },
@@ -123,9 +141,14 @@ class OpenAILLM(LLM):
         return resp.json()["choices"][0]["message"]["content"]
 
     def chat(self, question: str, chunks: list[ChunkView], history=None) -> str:
-        ctx = "\n\n".join(f"[{c.chapter or '资料'}] {c.content}" for c in chunks[:5])
+        ctx = "\n\n".join(
+            f"[资料{c.material_id}/片段{c.chunk_id or c.chunk_idx}] "
+            f"{c.title or c.chapter or '资料'}\n{c.content}"
+            for c in chunks[:8]
+        )
         return self._complete(
-            "你是智能学伴，仅依据给定资料回答，并标明引用。",
+            "你是智能学伴，仅依据给定资料回答。资料不足时明确说当前知识库未找到依据，"
+            "不要用常识补全或编造引用。",
             f"资料：\n{ctx}\n\n问题：{question}",
         )
 

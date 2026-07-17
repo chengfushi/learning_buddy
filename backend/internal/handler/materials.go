@@ -1,21 +1,19 @@
 package handler
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
-	"mime/multipart"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 
 	"learning_buddy/backend/internal/middleware"
 	"learning_buddy/backend/internal/model"
 	"learning_buddy/backend/internal/repository"
 	"learning_buddy/backend/internal/service"
+	objectstorage "learning_buddy/backend/internal/storage"
 )
 
 func (h *Handlers) listMaterials(c *gin.Context) {
@@ -52,6 +50,7 @@ func (h *Handlers) createMaterial(c *gin.Context) {
 
 	ct := c.ContentType()
 	if strings.HasPrefix(ct, "multipart/") {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, objectstorage.MaxUploadBytes+(1<<20))
 		teamID, err := bindID(c, "team_id")
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "缺少 team_id"})
@@ -62,7 +61,26 @@ func (h *Handlers) createMaterial(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "请提供资料标题"})
 			return
 		}
-		m, err := h.Svc.Materials.Create(c.Request.Context(), uid, role, in)
+		file, fileErr := c.FormFile("file")
+		var m *model.Material
+		if fileErr == nil && file != nil {
+			if file.Size > objectstorage.MaxUploadBytes {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "文件不能超过 50 MiB"})
+				return
+			}
+			source, openErr := file.Open()
+			if openErr != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "无法读取上传文件"})
+				return
+			}
+			defer func() { _ = source.Close() }()
+			m, err = h.Svc.Materials.CreateWithFile(
+				c.Request.Context(), uid, role, in, file.Filename,
+				file.Header.Get("Content-Type"), source,
+			)
+		} else {
+			m, err = h.Svc.Materials.Create(c.Request.Context(), uid, role, in)
+		}
 		if err != nil {
 			writeMaterialErr(c, err)
 			return
@@ -124,6 +142,88 @@ func (h *Handlers) getMaterial(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"material": m})
+}
+
+func (h *Handlers) getMaterialSourceURL(c *gin.Context) {
+	uid := middleware.CtxUserID(c)
+	id, err := bindID(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效资料"})
+		return
+	}
+	material, err := h.Svc.Repos.GetVisibleMaterial(c.Request.Context(), uid, id)
+	if err != nil || material.StorageKey == nil || *material.StorageKey == "" {
+		c.JSON(http.StatusNotFound, gin.H{"error": "原文件不存在"})
+		return
+	}
+	if h.Svc.Objects == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "对象存储不可用"})
+		return
+	}
+	value, err := h.Svc.Objects.PresignSource(c.Request.Context(), *material.StorageKey)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "生成下载地址失败"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"url": value, "expires_in": h.Svc.Cfg.AssetURLTTLSeconds})
+}
+
+func (h *Handlers) listMaterialAssets(c *gin.Context) {
+	uid := middleware.CtxUserID(c)
+	id, err := bindID(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效资料"})
+		return
+	}
+	assets, err := h.Svc.Repos.ListVisibleMaterialAssets(c.Request.Context(), uid, id)
+	if err != nil {
+		writeMaterialReadErr(c, err)
+		return
+	}
+	type assetView struct {
+		ID         int64   `json:"id"`
+		PageNumber *int    `json:"page_number"`
+		Caption    *string `json:"caption"`
+		OCRText    *string `json:"ocr_text"`
+		URL        string  `json:"url"`
+	}
+	items := make([]assetView, 0, len(assets))
+	for _, asset := range assets {
+		url := ""
+		if h.Svc.Objects != nil {
+			url, _ = h.Svc.Objects.PresignDerived(c.Request.Context(), asset.StorageKey)
+		}
+		items = append(items, assetView{
+			ID: asset.ID, PageNumber: asset.PageNumber, Caption: asset.Caption,
+			OCRText: asset.OCRText, URL: url,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"assets": items})
+}
+
+func (h *Handlers) getMaterialProcessing(c *gin.Context) {
+	uid := middleware.CtxUserID(c)
+	id, err := bindID(c, "id")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效资料"})
+		return
+	}
+	run, err := h.Svc.Repos.GetVisibleProcessingRun(c.Request.Context(), uid, id)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusOK, gin.H{"processing": nil})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取解析进度失败"})
+		return
+	}
+	progress := make(map[string]any)
+	_ = json.Unmarshal(run.Progress, &progress)
+	c.JSON(http.StatusOK, gin.H{"processing": gin.H{
+		"ID": run.ID, "MaterialID": run.MaterialID,
+		"ParseGeneration": run.ParseGeneration, "IndexVersion": run.IndexVersion,
+		"Stage": run.Stage, "Status": run.Status, "Progress": progress,
+	}})
 }
 
 func writeMaterialReadErr(c *gin.Context, err error) {
@@ -224,45 +324,7 @@ func (h *Handlers) buildCreateInput(teamID, uid int64, c *gin.Context) service.C
 	if v := c.PostForm("file_type"); v != "" {
 		in.FileType = &v
 	}
-	// 文件上传
-	file, err := c.FormFile("file")
-	if err == nil && file != nil {
-		sk, content := saveUpload(h.Svc.Cfg.UploadDir, file)
-		in.StorageKey = &sk
-		if in.Content == nil && content != nil {
-			in.Content = content
-		}
-		if in.FileType == nil {
-			ext := strings.TrimPrefix(filepath.Ext(file.Filename), ".")
-			ft := ext
-			in.FileType = &ft
-		}
-	}
 	return in
-}
-
-// saveUpload 保存上传文件到 UPLOAD_DIR，返回 storage_key 与（文本类文件的）内容。
-func saveUpload(dir string, file *multipart.FileHeader) (string, *string) {
-	_ = os.MkdirAll(dir, 0o750)
-	ext := filepath.Ext(file.Filename)
-	key := uuid.NewString() + ext
-	dst := filepath.Join(dir, key)
-	src, _ := file.Open()
-	defer func() { _ = src.Close() }()
-	out, _ := os.Create(dst) // #nosec G304 -- dst 由 uuid 生成，非用户输入
-	defer func() { _ = out.Close() }()
-	_, _ = out.ReadFrom(src)
-
-	var content *string
-	lower := strings.ToLower(ext)
-	if lower == ".txt" || lower == ".md" {
-		b, err := os.ReadFile(dst) // #nosec G304 -- dst 由 uuid 生成
-		if err == nil {
-			s := string(b)
-			content = &s
-		}
-	}
-	return key, content
 }
 
 func bindIDStr(s string) (int64, error) {

@@ -17,11 +17,13 @@ type contractExchange struct {
 }
 
 type agentContract struct {
-	Parse contractExchange `json:"parse"`
-	Embed contractExchange `json:"embed"`
-	Chat  contractExchange `json:"chat"`
-	Plan  contractExchange `json:"plan"`
-	Quiz  contractExchange `json:"quiz"`
+	Parse        contractExchange `json:"parse"`
+	Embed        contractExchange `json:"embed"`
+	AnalyzeQuery contractExchange `json:"analyze_query"`
+	Rerank       contractExchange `json:"rerank"`
+	Chat         contractExchange `json:"chat"`
+	Plan         contractExchange `json:"plan"`
+	Quiz         contractExchange `json:"quiz"`
 }
 
 func loadAgentContract(t *testing.T) agentContract {
@@ -52,6 +54,8 @@ func TestAgentContractFixtureMatchesBackendDTOs(t *testing.T) {
 
 	assertJSONRoundTrip[ParseRequest](t, contract.Parse.Request)
 	assertJSONRoundTrip[EmbedRequest](t, contract.Embed.Request)
+	assertJSONRoundTrip[QueryAnalysisRequest](t, contract.AnalyzeQuery.Request)
+	assertJSONRoundTrip[RerankRequest](t, contract.Rerank.Request)
 	assertJSONRoundTrip[ChatRequest](t, contract.Chat.Request)
 	assertJSONRoundTrip[PlanRequest](t, contract.Plan.Request)
 	assertJSONRoundTrip[QuizRequest](t, contract.Quiz.Request)
@@ -69,6 +73,8 @@ func TestAgentContractFixtureMatchesBackendDTOs(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(contract.Embed.Response, &embedResponse))
 	require.NotEmpty(t, embedResponse.Embedding)
+	assertJSONRoundTrip[QueryAnalysisResult](t, contract.AnalyzeQuery.Response)
+	assertJSONRoundTrip[RerankResult](t, contract.Rerank.Response)
 
 	var chatResponse struct {
 		Answer    string     `json:"answer"`

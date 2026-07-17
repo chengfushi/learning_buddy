@@ -21,6 +21,37 @@
       "embedding": [0.1, 0.2]
     }
   },
+  "analyze_query": {
+    "request": {
+      "question": "它怎么配置？",
+      "history": [{"role": "user", "content": "我们在讨论 MQTT"}]
+    },
+    "response": {
+      "retrieval_query": "MQTT 怎么配置？",
+      "keywords": ["mqtt", "配置"],
+      "embedding": [0.1, 0.2],
+      "rewrite_applied": true,
+      "model": "contract-rewriter"
+    }
+  },
+  "rerank": {
+    "request": {
+      "query": "MQTT 怎么配置？",
+      "candidates": [{
+        "chunk_id": 420,
+        "material_id": 42,
+        "content": "MQTT 配置参数",
+        "title": "通讯模块",
+        "kind": "body"
+      }],
+      "top_n": 1
+    },
+    "response": {
+      "items": [{"chunk_id": 420, "score": 0.99}],
+      "model": "qwen3-rerank",
+      "degraded": false
+    }
+  },
   "chat": {
     "request": {
       "question": "contract question",

@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { api, type Material, type MaterialNote } from "../api";
+import ReactMarkdown from "react-markdown";
+import { api, type Material, type MaterialAsset, type MaterialNote } from "../api";
 
 export default function Reader({
   materialId,
@@ -12,6 +13,8 @@ export default function Reader({
 }) {
   const [material, setMaterial] = useState<Material | null>(null);
   const [notes, setNotes] = useState<MaterialNote[]>([]);
+  const [assets, setAssets] = useState<MaterialAsset[]>([]);
+  const [sourceURL, setSourceURL] = useState("");
   const [note, setNote] = useState("");
   const [loadingMaterial, setLoadingMaterial] = useState(true);
   const [loadingNotes, setLoadingNotes] = useState(true);
@@ -21,6 +24,8 @@ export default function Reader({
   const load = () => {
     setMaterial(null);
     setNotes([]);
+    setAssets([]);
+    setSourceURL("");
     setLoadingMaterial(true);
     setLoadingNotes(true);
     setErr("");
@@ -35,6 +40,14 @@ export default function Reader({
       .then((r) => setNotes(r.notes))
       .catch((e) => setNotesErr(e instanceof Error ? e.message : "笔记加载失败"))
       .finally(() => setLoadingNotes(false));
+    api
+      .listMaterialAssets(materialId)
+      .then((result) => setAssets(result.assets))
+      .catch(() => undefined);
+    api
+      .getMaterialSourceURL(materialId)
+      .then((result) => setSourceURL(result.url))
+      .catch(() => undefined);
   };
   useEffect(() => {
     load();
@@ -72,9 +85,33 @@ export default function Reader({
             {material.Subject || material.Chapter || "无章节"} · 状态：{material.ParseStatus}
             {material.Shared ? " · 已共享" : ""}
           </div>
+          {sourceURL && (
+            <a className="source-download" href={sourceURL}>
+              下载原文件
+            </a>
+          )}
+          {material.Summary && <div className="material-summary">{material.Summary}</div>}
           <div className="prose">
-            {material.Content || "（暂无正文，可能是未解析的文件类资料）"}
+            <ReactMarkdown>
+              {material.Content || "（暂无正文，可能是未解析的文件类资料）"}
+            </ReactMarkdown>
           </div>
+          {assets.length > 0 && (
+            <section className="asset-gallery" aria-label="资料图片">
+              {assets.map((asset) => (
+                <figure key={asset.id} id={`asset-${asset.id}`}>
+                  <img
+                    src={asset.url}
+                    alt={asset.caption || `第 ${asset.page_number ?? "?"} 页图片`}
+                    loading="lazy"
+                  />
+                  {(asset.caption || asset.page_number) && (
+                    <figcaption>{asset.caption || `第 ${asset.page_number} 页`}</figcaption>
+                  )}
+                </figure>
+              ))}
+            </section>
+          )}
         </article>
       ) : null}
       <section className="card">

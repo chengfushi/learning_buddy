@@ -1,7 +1,7 @@
 # 智能学伴系统 · 系统设计文档
 
-> 版本：v0.3 · 状态：设计稿（修订） · 最后更新：2026-07-11
-> 变更：v0.4 将资料可见性与 pgvector top-k 收口 Backend repository，Agent 生成端只消费已授权 chunks，Parser 使用最小读写凭证；同时完善班级码+审批态、解析状态机与 embedding 维度断言。
+> 版本：v0.5 · 状态：设计稿（修订） · 最后更新：2026-07-17
+> 变更：v0.5 增加 RAG v2 的对象存储解析管道、混合召回、Rerank、父资料扩展、反馈闭环和影子索引灰度；资料可见性仍由 Backend repository 作为唯一真源。
 
 ---
 
@@ -247,17 +247,17 @@ Orchestrator ──SSE 流式──▶ 后端 ──▶ 前端
 
 ### 7.3 RAG 流程
 
-1. Backend 调 Agent `/embed` 将问题转为 Embedding（800ms 检索总预算）。
-2. Backend repository 在 `VisibleMaterialsScope` 子查询内执行 pgvector top-k；指定 `material_id` 仍先验证可见性。
-3. 重排 → 拼入 prompt。
-4. LLM 生成回答，输出引用来源（team / material / chapter）。
-5. 新问答写入对话历史（Redis 短期 + PostgreSQL 长期）。
+1. Backend 验证会话归属并读取最近 20 条消息，Agent `/analyze-query` 仅对指代性追问改写，同时生成关键词和 1024 维 Embedding。
+2. Backend repository 在 `VisibleMaterialsScope` 内分别执行 HNSW 向量 Top-30 与全文/Trigram 词法 Top-30，以 RRF(k=60) 融合为 20 条。指定 `material_id` 仍先验证可见性。
+3. Agent `/rerank` 对已授权候选使用 `qwen3-rerank` 取 Top-8；Backend 再次套用可见性谓词，按父资料扩展同章节和相邻正文块，限制为 3 份资料、8 块、12k Token。
+4. LLM 回答原始问题；引用只能来自实际上下文块，Backend 使用可信数据库字段重建 material/chunk/asset 引用。
+5. 原始/改写查询、阶段耗时、候选分数和反馈写入 PostgreSQL；Redis 只缓存查询分析、Embedding 与候选内容哈希对应的 Rerank 结果。
 
-> **R6 超时与降级**：Backend 对 Embedding + repository 检索设置 `800ms` 总预算，失败或超时则向 Agent 下发空 chunks；Agent 对 Tutor 设置 `30s` 预算，失败时切换本地 MockLLM。SSE 响应返回 `X-Trace-ID` 便于关联日志。
+> **R6 超时与降级**：总检索目标 P95 ≤ 2.5 秒；降级顺序为 Rewrite→原问题、Embedding→词法召回、Rerank→RRF、OCR→仅展示图片、无候选→有据拒答。Agent 对 Tutor 设置 `30s` 预算，SSE 使用 `trace_id` 关联各阶段。
 
 ### 7.4 上下文与记忆
 
-- **短期上下文**：当前会话轮次存 Redis（TTL 可配）。
+- **短期上下文**：Backend 从 PostgreSQL 读取当前用户会话最近 20 条消息；前端按全局/资料作用域分别复用 `session_id`。
 - **长期记忆**：用户画像、薄弱点、偏好存 PostgreSQL。
 - **安全**：可见性谓词与向量 SQL 只存在于 Backend repository；Agent 不提供 `/retrieve`，请求契约只接收已授权 chunks。Parser 的数据库凭证仅需读取资料归属、更新正文并读写 chunks，不得访问用户、成员与认证数据。
 
@@ -414,27 +414,41 @@ CREATE INDEX idx_tu_user ON token_usage(user_id, created_at);
 
 ```sql
 CREATE EXTENSION IF NOT EXISTS vector;
--- Embedding 模型：使用 Google ADK 配套的 text-embedding 模型，维度 <DIM> 通过环境变量 EMBEDDING_DIM 注入，全库必须一致。
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE TABLE material_chunks (
-  id          BIGSERIAL PRIMARY KEY,
-  team_id     BIGINT REFERENCES teams(id),    -- 知识库归属，检索时按可见 team 过滤
-  material_id BIGINT REFERENCES materials(id),
-  chunk_idx   INT,
-  content     TEXT,
-  embedding   vector(<DIM>)                    -- 维度由 embedding 模型决定（如 Gemini 768 / 3072），经配置注入
+  id            BIGSERIAL PRIMARY KEY,
+  team_id       BIGINT REFERENCES teams(id),
+  material_id   BIGINT REFERENCES materials(id),
+  index_version VARCHAR(40) NOT NULL,
+  kind          VARCHAR(20) NOT NULL,           -- body/summary/question/image
+  chunk_idx     INT NOT NULL,
+  heading_path  TEXT,
+  page_number   INT,
+  token_count   INT NOT NULL DEFAULT 0,
+  lexical_text  TEXT NOT NULL DEFAULT '',
+  lexical_tsv   TSVECTOR GENERATED ALWAYS AS (to_tsvector('simple', lexical_text)) STORED,
+  content       TEXT NOT NULL,
+  embedding     vector(1024),
+  asset_id      BIGINT REFERENCES material_assets(id)
 );
-CREATE INDEX idx_chunk_team ON material_chunks(team_id);
-CREATE INDEX idx_chunk_vec ON material_chunks
-  USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
--- 检索谓词（Backend repository 直接执行）：team_id IN (可见集合) AND (teams.type <> 'teacher' OR materials.shared = true)
+CREATE UNIQUE INDEX uq_material_chunks_version_kind_idx
+  ON material_chunks(material_id, index_version, kind, chunk_idx);
+CREATE INDEX idx_chunk_vec_hnsw ON material_chunks
+  USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 128);
+CREATE INDEX idx_chunk_lexical_tsv ON material_chunks USING gin (lexical_tsv);
+CREATE INDEX idx_chunk_lexical_trgm ON material_chunks USING gin (lexical_text gin_trgm_ops);
+-- 检索和父资料扩展均复用 Backend repository 的 VisibleMaterialsScope。
 ```
+
+完整 RAG v2 表结构以 `backend/migrations/0008_rag_v2.sql` 为准；上线与回滚步骤见 `docs/rag-v2-production.md`。
 
 ### 8.3 Redis 缓存策略
 
 | Key 模式 | 内容 | TTL |
 |----------|------|-----|
-| `session:{session_id}` | 当前对话上下文（短期记忆） | 30 min 闲置 |
+| `rag:analysis:{hash}` | Query Rewrite、关键词与 Embedding | 30 min |
+| `rag:rerank:{hash}` | 模型、Top-N 与候选内容哈希对应的 Rerank 结果 | 60 min |
 | `team:visible:{user_id}` | 用户可见 team 集合（加速鉴权/检索） | 5 min |
 | `cache:material:{id}` | 热点资料正文 | 10 min |
 | `ratelimit:agent:{user_id}` | 对话限流计数 | 1 min |

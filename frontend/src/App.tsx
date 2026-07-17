@@ -66,7 +66,9 @@ export default function App() {
           <>
             {view === "library" && <Library onOpenMaterial={(id) => setOpenMaterial(id)} />}
             {view === "teams" && <Teams />}
-            {view === "companion" && <Companion materialId={companionMat} />}
+            {view === "companion" && (
+              <Companion materialId={companionMat} onOpenMaterial={(id) => setOpenMaterial(id)} />
+            )}
             {view === "learning" && <Learning />}
           </>
         )}

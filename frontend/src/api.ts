@@ -36,6 +36,11 @@ export interface Material {
   Shared: boolean;
   OwnerID: number;
   CreatedAt: string;
+  Summary?: string | null;
+  SemanticKeywords?: string[] | null;
+  SuggestedQuestions?: string[] | null;
+  NormalizedStorageKey?: string | null;
+  IndexVersion?: string;
 }
 
 const MaterialSchema: z.ZodType<Material> = z.object({
@@ -53,6 +58,11 @@ const MaterialSchema: z.ZodType<Material> = z.object({
   Shared: z.boolean(),
   OwnerID: z.number(),
   CreatedAt: z.string(),
+  Summary: z.string().nullable().optional(),
+  SemanticKeywords: z.array(z.string()).nullable().optional(),
+  SuggestedQuestions: z.array(z.string()).nullable().optional(),
+  NormalizedStorageKey: z.string().nullable().optional(),
+  IndexVersion: z.string().optional(),
 });
 
 const TeamMaterialsResponseSchema = z.object({
@@ -142,6 +152,46 @@ export interface Citation {
   material_id: number;
   chapter: string;
   chunk_idx: number;
+  chunk_id?: number;
+  title?: string;
+  snippet?: string;
+  kind?: string;
+  page_number?: number;
+  score?: number;
+  asset_id?: number;
+}
+
+export interface MaterialAsset {
+  id: number;
+  page_number: number | null;
+  caption: string | null;
+  ocr_text: string | null;
+  url: string;
+}
+
+export interface MaterialProcessing {
+  ID: number;
+  MaterialID: number;
+  ParseGeneration: number;
+  IndexVersion: string;
+  Stage: string;
+  Status: string;
+  Progress: Record<string, number | string>;
+}
+
+export interface ChatMeta {
+  session_id: string;
+  trace_id: string;
+  rewritten_query: string;
+  rewrite_applied: boolean;
+}
+
+export interface ChatDone {
+  session_id: string;
+  message_id: number;
+  citations: Citation[];
+  stage_ms: Record<string, number>;
+  degraded_stages: string[];
 }
 
 export interface ChatResult {
@@ -150,6 +200,26 @@ export interface ChatResult {
 }
 
 const TOKEN_KEY = "lb_token";
+
+const MaterialAssetSchema: z.ZodType<MaterialAsset> = z.object({
+  id: z.number(),
+  page_number: z.number().nullable(),
+  caption: z.string().nullable(),
+  ocr_text: z.string().nullable(),
+  url: z.string(),
+});
+
+const MaterialAssetsResponseSchema = z.object({ assets: z.array(MaterialAssetSchema) });
+const SourceURLResponseSchema = z.object({ url: z.string().url(), expires_in: z.number() });
+const MaterialProcessingSchema: z.ZodType<MaterialProcessing> = z.object({
+  ID: z.number(),
+  MaterialID: z.number(),
+  ParseGeneration: z.number(),
+  IndexVersion: z.string(),
+  Stage: z.string(),
+  Status: z.string(),
+  Progress: z.record(z.union([z.number(), z.string()])),
+});
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -286,12 +356,39 @@ export const api = {
     file_type?: string;
     tags?: string[];
   }) => request<{ material: Material }>("POST", "/materials", input),
+  uploadMaterial: async (input: { team_id: number; title: string; file: File }) => {
+    const form = new FormData();
+    form.set("team_id", String(input.team_id));
+    form.set("title", input.title);
+    form.set("file", input.file);
+    const headers: Record<string, string> = {};
+    const token = getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch("/api/materials", { method: "POST", headers, body: form });
+    if (!response.ok) {
+      const payload = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new ApiError(response.status, payload.error ?? `上传失败 (${response.status})`);
+    }
+    const payload: unknown = await response.json();
+    return z.object({ material: MaterialSchema }).parse(payload);
+  },
   getMaterial: (id: number) => request<{ material: Material }>("GET", `/materials/${id}`),
   updateMaterial: (id: number, body: { title?: string; content?: string; shared?: boolean }) =>
     request<{ material: Material }>("PUT", `/materials/${id}`, body),
   deleteMaterial: (id: number) => request<{ ok: boolean }>("DELETE", `/materials/${id}`),
   retryMaterialParse: (id: number) =>
     request("POST", `/materials/${id}/retry`, undefined, RetryMaterialResponseSchema),
+  getMaterialSourceURL: (id: number) =>
+    request("GET", `/materials/${id}/source-url`, undefined, SourceURLResponseSchema),
+  listMaterialAssets: (id: number) =>
+    request("GET", `/materials/${id}/assets`, undefined, MaterialAssetsResponseSchema),
+  getMaterialProcessing: (id: number) =>
+    request(
+      "GET",
+      `/materials/${id}/processing`,
+      undefined,
+      z.object({ processing: MaterialProcessingSchema.nullable() }),
+    ),
 
   // 笔记
   listNotes: (id: number) => request<{ notes: MaterialNote[] }>("GET", `/materials/${id}/notes`),
@@ -324,13 +421,22 @@ export const api = {
       { choice },
     ),
   listSessions: () => request<{ sessions: AgentSession[] }>("GET", "/agent/sessions"),
+  submitFeedback: (messageId: number, rating: "up" | "down", reason?: string) =>
+    request<{ feedback: { ID: number; Rating: string; Reason: string | null } }>(
+      "PUT",
+      `/agent/messages/${messageId}/feedback`,
+      { rating, reason },
+    ),
 
   // SSE 答疑（fetch + ReadableStream，避免 token 进 URL，呼应 R4）
   chatStream: async (
     req: { question: string; session_id?: string; material_id?: number },
     handlers: {
       onToken: (t: string) => void;
-      onCitations: (c: Citation[]) => void;
+      /** @deprecated citations are carried by onDone; kept for existing clients. */
+      onCitations?: (citations: Citation[]) => void;
+      onMeta?: (meta: ChatMeta) => void;
+      onDone?: (done: ChatDone) => void;
       onEnd: () => void;
       onError: (m: string) => void;
     },
@@ -343,10 +449,32 @@ export const api = {
             type: string;
             text?: string;
             citations?: Citation[];
+            session_id?: string;
+            trace_id?: string;
+            rewritten_query?: string;
+            rewrite_applied?: boolean;
+            message_id?: number;
+            stage_ms?: Record<string, number>;
+            degraded_stages?: string[];
           };
           if (ev.type === "token" && ev.text) handlers.onToken(ev.text);
-          else if (ev.type === "done" && ev.citations) handlers.onCitations(ev.citations);
-          else if (ev.type === "error" && ev.text) handlers.onError(ev.text);
+          else if (ev.type === "meta" && ev.session_id) {
+            handlers.onMeta?.({
+              session_id: ev.session_id,
+              trace_id: ev.trace_id ?? "",
+              rewritten_query: ev.rewritten_query ?? "",
+              rewrite_applied: ev.rewrite_applied ?? false,
+            });
+          } else if (ev.type === "done" && ev.session_id) {
+            handlers.onCitations?.(ev.citations ?? []);
+            handlers.onDone?.({
+              session_id: ev.session_id,
+              message_id: ev.message_id ?? 0,
+              citations: ev.citations ?? [],
+              stage_ms: ev.stage_ms ?? {},
+              degraded_stages: ev.degraded_stages ?? [],
+            });
+          } else if (ev.type === "error" && ev.text) handlers.onError(ev.text);
         } catch {
           /* 忽略无法解析的行 */
         }

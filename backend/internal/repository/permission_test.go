@@ -188,3 +188,44 @@ func TestRetrieveVisibleChunks_R2(t *testing.T) {
 	_, err = repo.GetVisibleMaterial(ctx, outsider.ID, shared.ID)
 	assert.ErrorIs(t, err, ErrNotFound)
 }
+
+func TestHybridVisibleCandidatesMatchesChineseKeywordsIndependently(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	tx := db.Begin()
+	require.NoError(t, tx.Error)
+	defer tx.Rollback()
+	repo := New(tx)
+
+	owner := model.User{Email: "lexical_" + uuid.NewString() + "@t.dev", Role: "student"}
+	require.NoError(t, tx.Create(&owner).Error)
+	team := model.Team{Name: "词法检索", Type: "private", OwnerID: &owner.ID}
+	require.NoError(t, tx.Create(&team).Error)
+	material := model.Material{
+		TeamID: team.ID, Title: "消息队列手册", OwnerID: owner.ID, IndexVersion: "legacy-v1",
+	}
+	require.NoError(t, tx.Create(&material).Error)
+	embedding := make([]float64, 1024)
+	require.NoError(t, tx.Exec(
+		"INSERT INTO material_chunks "+
+			"(team_id, material_id, chunk_idx, content, lexical_text, embedding, index_version) "+
+			"VALUES (?, ?, 0, ?, ?, ?::vector, 'legacy-v1')",
+		team.ID,
+		material.ID,
+		"消息队列连接配置参数",
+		"消息队列连接配置参数",
+		vectorLiteral(embedding),
+	).Error)
+
+	chunks, err := repo.HybridVisibleCandidates(
+		ctx,
+		owner.ID,
+		nil,
+		[]string{"它怎么配置", "消息队列", "配置"},
+		nil,
+		20,
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, chunks)
+	assert.Equal(t, material.ID, chunks[0].MaterialID)
+}

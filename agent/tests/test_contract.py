@@ -9,7 +9,17 @@ from fastapi.testclient import TestClient
 import main
 from auth import AGENT_TOKEN_HEADER
 from db import settings
-from schemas import ChatRequest, EmbedRequest, ParseRequest, PlanRequest, QuizRequest
+from schemas import (
+    ChatRequest,
+    EmbedRequest,
+    ParseRequest,
+    PlanRequest,
+    QueryAnalysisRequest,
+    QueryAnalysisResponse,
+    QuizRequest,
+    RerankRequest,
+    RerankResponse,
+)
 
 CONTRACT_PATH = Path(__file__).resolve().parents[2] / "tests" / "contracts" / "agent_api.json"
 TEST_SECRET = "contract-agent-secret"
@@ -30,6 +40,8 @@ def test_contract_requests_match_pydantic_models(contract: dict[str, object]) ->
     models = {
         "parse": ParseRequest,
         "embed": EmbedRequest,
+        "analyze_query": QueryAnalysisRequest,
+        "rerank": RerankRequest,
         "chat": ChatRequest,
         "plan": PlanRequest,
         "quiz": QuizRequest,
@@ -66,6 +78,28 @@ def test_contract_matches_fastapi_responses(
     response = client.post("/embed", json=embed_exchange["request"], headers=headers)
     assert response.status_code == 200
     assert response.json() == embed_response
+
+    analyze_exchange = contract["analyze_query"]
+    assert isinstance(analyze_exchange, dict)
+
+    async def fake_analyze(_request: object) -> object:
+        return QueryAnalysisResponse.model_validate(analyze_exchange["response"])
+
+    monkeypatch.setattr(main, "analyze_query", fake_analyze)
+    response = client.post("/analyze-query", json=analyze_exchange["request"], headers=headers)
+    assert response.status_code == 200
+    assert response.json() == analyze_exchange["response"]
+
+    rerank_exchange = contract["rerank"]
+    assert isinstance(rerank_exchange, dict)
+
+    async def fake_rerank(_request: object) -> object:
+        return RerankResponse.model_validate(rerank_exchange["response"])
+
+    monkeypatch.setattr(main, "rerank", fake_rerank)
+    response = client.post("/rerank", json=rerank_exchange["request"], headers=headers)
+    assert response.status_code == 200
+    assert response.json() == rerank_exchange["response"]
 
     plan_exchange = contract["plan"]
     assert isinstance(plan_exchange, dict)

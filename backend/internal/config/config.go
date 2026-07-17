@@ -20,6 +20,16 @@ type Config struct {
 	EmbeddingDim         int
 	Addr                 string
 	UploadDir            string
+	MinIOEndpoint        string
+	MinIOPublicEndpoint  string
+	MinIOAccessKey       string
+	MinIOSecretKey       string
+	MinIOSecure          bool
+	MinIOPublicSecure    bool
+	MinIORegion          string
+	MinIOSourceBucket    string
+	MinIODerivedBucket   string
+	AssetURLTTLSeconds   int
 }
 
 // Load 加载配置：先尝试读取 .env（若存在），再以环境变量覆盖。
@@ -52,6 +62,12 @@ func Load() *Config {
 	if agentBaseURL == "" {
 		agentBaseURL = "http://localhost:8000"
 	}
+	minIOEndpoint := envOr("MINIO_ENDPOINT", "localhost:9000")
+	minIOSecure := envBool("MINIO_SECURE", false)
+	minIOPublicSecure := minIOSecure
+	if _, configured := os.LookupEnv("MINIO_PUBLIC_SECURE"); configured {
+		minIOPublicSecure = envBool("MINIO_PUBLIC_SECURE", false)
+	}
 	return &Config{
 		DBDSN:                dbDSN,
 		JWTSecret:            jwtSecret,
@@ -61,7 +77,43 @@ func Load() *Config {
 		EmbeddingDim:         dim,
 		Addr:                 addr,
 		UploadDir:            uploadDir,
+		MinIOEndpoint:        minIOEndpoint,
+		MinIOPublicEndpoint:  envOr("MINIO_PUBLIC_ENDPOINT", minIOEndpoint),
+		MinIOAccessKey:       envOr("MINIO_ACCESS_KEY", "minioadmin"),
+		MinIOSecretKey:       envOr("MINIO_SECRET_KEY", "minioadmin"),
+		MinIOSecure:          minIOSecure,
+		MinIOPublicSecure:    minIOPublicSecure,
+		MinIORegion:          envOr("MINIO_REGION", "us-east-1"),
+		MinIOSourceBucket:    envOr("MINIO_SOURCE_BUCKET", "materials-source"),
+		MinIODerivedBucket:   envOr("MINIO_DERIVED_BUCKET", "materials-derived"),
+		AssetURLTTLSeconds:   envInt("ASSET_URL_TTL_SECONDS", 600),
 	}
+}
+
+func envOr(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}
+
+func envInt(key string, fallback int) int {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil {
+			return parsed
+		}
+	}
+	return fallback
+}
+
+func envBool(key string, fallback bool) bool {
+	if value := os.Getenv(key); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err == nil {
+			return parsed
+		}
+	}
+	return fallback
 }
 
 // Validate 校验生产安全所需的必填配置。

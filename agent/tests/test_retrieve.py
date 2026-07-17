@@ -78,7 +78,8 @@ def test_parse_is_idempotent(parse_material: None, monkeypatch: pytest.MonkeyPat
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT count(*), count(DISTINCT chunk_idx) FROM material_chunks "
+                "SELECT count(*), count(DISTINCT (index_version, kind, chunk_idx)) "
+                "FROM material_chunks "
                 "WHERE material_id=%s",
                 (MATERIAL_ID,),
             )
@@ -115,7 +116,8 @@ def test_timed_out_retry_cannot_duplicate_chunks(
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT count(*), count(DISTINCT chunk_idx) FROM material_chunks "
+                "SELECT count(*), count(DISTINCT (index_version, kind, chunk_idx)) "
+                "FROM material_chunks "
                 "WHERE material_id=%s",
                 (MATERIAL_ID,),
             )

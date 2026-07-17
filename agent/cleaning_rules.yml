@@ -1,0 +1,14 @@
+version: 2026-07-v1
+patterns:
+  - name: confluence_page_id
+    expression: '(?im)^\s*(?:confluence\s*)?page\s*id\s*[:：]\s*\d+\s*$'
+  - name: edit_history
+    expression: '(?im)^\s*(?:上次编辑者|最后编辑|编辑历史)\s*[:：].*$'
+  - name: browser_video
+    expression: '(?im)^\s*您的浏览器不支持\s*(?:video|audio)\s*标签.*$'
+  - name: download_stats
+    expression: '(?im)^\s*(?:下载次数|浏览次数|上传时间)\s*[:：].*$'
+  - name: forum_marker
+    expression: '(?im)^\s*(?:回复区|全部回复|附件下载|展开回复)\s*$'
+  - name: numeric_only
+    expression: '(?m)^\s*\d{5,}\s*$'

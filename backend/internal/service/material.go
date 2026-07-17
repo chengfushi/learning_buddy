@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"time"
 
 	"learning_buddy/backend/internal/model"
+	"learning_buddy/backend/internal/observability"
 	"learning_buddy/backend/internal/repository"
 )
 
@@ -18,6 +20,12 @@ type MaterialService struct {
 	agent        materialParser
 	parseAlerter parseFailureAlerter
 	parsePolicy  parseRetryPolicy
+	objects      materialObjectStore
+}
+
+type materialObjectStore interface {
+	PutSource(context.Context, int64, string, string, []byte) (string, string, error)
+	DeleteSource(context.Context, string) error
 }
 
 type materialParser interface {
@@ -54,13 +62,64 @@ var defaultParseRetryPolicy = parseRetryPolicy{
 // ErrMaterialParseNotFailed 表示资料当前不处于可重试的失败状态。
 var ErrMaterialParseNotFailed = errors.New("material parse status is not failed")
 
-func NewMaterialService(repos *repository.Repositories, agent *AgentService, alertWebhookURL string) *MaterialService {
+func NewMaterialService(
+	repos *repository.Repositories,
+	agent *AgentService,
+	objects materialObjectStore,
+	alertWebhookURL string,
+) *MaterialService {
 	return &MaterialService{
 		repos:        repos,
 		agent:        agent,
 		parseAlerter: newParseFailureAlerter(alertWebhookURL),
 		parsePolicy:  defaultParseRetryPolicy,
+		objects:      objects,
 	}
+}
+
+// CreateWithFile 校验并上传原文件；TXT/Markdown 同时填充正文以兼容无对象存储读取路径。
+func (s *MaterialService) CreateWithFile(
+	ctx context.Context,
+	userID int64,
+	role string,
+	in CreateInput,
+	filename string,
+	contentType string,
+	reader io.Reader,
+) (*model.Material, error) {
+	if err := s.authorizeTeamWrite(ctx, userID, role, in.TeamID); err != nil {
+		return nil, err
+	}
+	if s.objects == nil {
+		return nil, errors.New("object storage is unavailable")
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, (50<<20)+1))
+	if err != nil {
+		return nil, fmt.Errorf("read upload: %w", err)
+	}
+	if len(data) > 50<<20 {
+		return nil, errors.New("file exceeds 50 MiB")
+	}
+	storageKey, fileType, err := s.objects.PutSource(
+		ctx, in.TeamID, filename, contentType, data,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("store upload: %w", err)
+	}
+	in.StorageKey = &storageKey
+	in.FileType = &fileType
+	if (fileType == "txt" || fileType == "md") && in.Content == nil {
+		content := string(data)
+		in.Content = &content
+	}
+	material, err := s.createAuthorized(ctx, in)
+	if err != nil {
+		if deleteErr := s.objects.DeleteSource(context.WithoutCancel(ctx), storageKey); deleteErr != nil {
+			slog.Warn("delete orphan source upload", "storage_key", storageKey, "err", deleteErr)
+		}
+		return nil, err
+	}
+	return material, nil
 }
 
 // CreateInput 创建资料入参。
@@ -78,17 +137,36 @@ type CreateInput struct {
 
 // Create 创建资料，校验写权限后落库，并异步触发解析（F2 基座：上传即解析）。
 func (s *MaterialService) Create(ctx context.Context, userID int64, role string, in CreateInput) (*model.Material, error) {
-	team, err := s.repos.GetTeam(ctx, in.TeamID)
-	if err != nil {
+	if err := s.authorizeTeamWrite(ctx, userID, role, in.TeamID); err != nil {
 		return nil, err
+	}
+	return s.createAuthorized(ctx, in)
+}
+
+func (s *MaterialService) authorizeTeamWrite(
+	ctx context.Context,
+	userID int64,
+	role string,
+	teamID int64,
+) error {
+	team, err := s.repos.GetTeam(ctx, teamID)
+	if err != nil {
+		return fmt.Errorf("get team for material write: %w", err)
 	}
 	ok, err := s.repos.CanWriteToTeam(ctx, userID, role, team)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("authorize material write: %w", err)
 	}
 	if !ok {
-		return nil, ErrForbidden
+		return ErrForbidden
 	}
+	return nil
+}
+
+func (s *MaterialService) createAuthorized(
+	ctx context.Context,
+	in CreateInput,
+) (*model.Material, error) {
 	m := &model.Material{
 		TeamID:          in.TeamID,
 		Title:           in.Title,
@@ -104,7 +182,7 @@ func (s *MaterialService) Create(ctx context.Context, userID int64, role string,
 		OwnerID:         in.OwnerID,
 	}
 	if err := s.repos.DB.WithContext(ctx).Create(m).Error; err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create material: %w", err)
 	}
 	// 异步触发解析（不阻塞请求；Agent 负责写 chunks 并回写 parse_status）
 	go s.triggerParse(context.WithoutCancel(ctx), m.ID)
@@ -304,6 +382,7 @@ func (s *MaterialService) triggerParse(ctx context.Context, materialID int64) {
 		)
 	}
 	if err != nil && finished {
+		observability.RecordParseFailure()
 		slog.Error("material parse task exhausted retries", "material_id", materialID, "err", failureMessage)
 		alertCtx, alertCancel := context.WithTimeout(context.WithoutCancel(ctx), s.parsePolicy.alertTimeout)
 		defer alertCancel()

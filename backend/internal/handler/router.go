@@ -43,6 +43,9 @@ func Register(r *gin.Engine, svc *service.Services) {
 		auth.GET("/materials", h.listMaterials)
 		auth.POST("/materials", h.createMaterial)
 		auth.GET("/materials/:id", h.getMaterial)
+		auth.GET("/materials/:id/source-url", h.getMaterialSourceURL)
+		auth.GET("/materials/:id/assets", h.listMaterialAssets)
+		auth.GET("/materials/:id/processing", h.getMaterialProcessing)
 		auth.PUT("/materials/:id", h.updateMaterial)
 		auth.DELETE("/materials/:id", h.deleteMaterial)
 		auth.POST("/materials/:id/retry", middleware.RequireRole("student", "teacher", "super_admin"), h.retryMaterialParse)
@@ -61,7 +64,8 @@ func Register(r *gin.Engine, svc *service.Services) {
 		// 对话 / Agent（F4/F5/F7/F8）
 		auth.GET("/agent/sessions", h.listSessions)
 		auth.GET("/agent/sessions/:id", h.getSession)
-		auth.POST("/agent/chat", h.chat)                  // SSE 流式
+		auth.POST("/agent/chat", h.chat) // SSE 流式
+		auth.PUT("/agent/messages/:id/feedback", h.feedback)
 		auth.POST("/agent/plan", h.createPlan)            // F7
 		auth.POST("/agent/quiz", h.createQuiz)            // F8 生成
 		auth.POST("/agent/quiz/:id/answer", h.answerQuiz) // F8 提交批改

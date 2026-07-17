@@ -1,6 +1,6 @@
 # learning_buddy 常用命令
 
-.PHONY: infra dev lint format migrate provision-parser
+.PHONY: infra dev lint format migrate provision-parser reindex-rag-v2 activate-rag-v2 rollback-rag-v2
 
 ## 仅起基础设施（db / redis / minio）
 infra:
@@ -35,3 +35,19 @@ provision-parser:
 	@test -n "$$DB_DSN" || (echo "DB_DSN is required" >&2; exit 1)
 	@test -n "$$PARSER_DB_PASSWORD" || (echo "PARSER_DB_PASSWORD is required" >&2; exit 1)
 	@psql "$$DB_DSN" -v ON_ERROR_STOP=1 --single-transaction -f backend/scripts/provision_parser.sql
+
+reindex-rag-v2:
+	@test -n "$$DB_DSN" || (echo "DB_DSN is required" >&2; exit 1)
+	@psql "$$DB_DSN" -v ON_ERROR_STOP=1 -f backend/scripts/reindex_rag_v2.sql
+
+activate-rag-v2:
+	@test -n "$$DB_DSN" || (echo "DB_DSN is required" >&2; exit 1)
+	@case "$$RAG_ROLLOUT_PERCENTAGE" in 10|50|100) ;; \
+		*) echo "RAG_ROLLOUT_PERCENTAGE must be 10, 50, or 100" >&2; exit 1 ;; esac
+	@psql "$$DB_DSN" -v ON_ERROR_STOP=1 \
+		-v rollout_percentage="$$RAG_ROLLOUT_PERCENTAGE" \
+		-f backend/scripts/activate_rag_v2.sql
+
+rollback-rag-v2:
+	@test -n "$$DB_DSN" || (echo "DB_DSN is required" >&2; exit 1)
+	@psql "$$DB_DSN" -v ON_ERROR_STOP=1 -f backend/scripts/rollback_rag_v2.sql

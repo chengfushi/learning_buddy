@@ -74,6 +74,52 @@ type recordingParseAlerter struct {
 	calls int
 }
 
+type recordingMaterialObjectStore struct {
+	putCalls int
+}
+
+func (s *recordingMaterialObjectStore) PutSource(
+	context.Context,
+	int64,
+	string,
+	string,
+	[]byte,
+) (string, string, error) {
+	s.putCalls++
+	return "source/key.txt", "txt", nil
+}
+
+func (*recordingMaterialObjectStore) DeleteSource(context.Context, string) error { return nil }
+
+func TestCreateWithFileAuthorizesBeforeObjectUpload(t *testing.T) {
+	svcs, db := newTestServices(t)
+	tx := db.Begin()
+	require.NoError(t, tx.Error)
+	defer tx.Rollback()
+	svcs.Repos.DB = tx
+
+	owner := model.User{Email: "upload-owner-" + uuid.NewString() + "@test.dev", Role: "teacher"}
+	require.NoError(t, tx.Create(&owner).Error)
+	outsider := model.User{Email: "upload-outsider-" + uuid.NewString() + "@test.dev", Role: "teacher"}
+	require.NoError(t, tx.Create(&outsider).Error)
+	team := model.Team{Name: "upload-team", Type: "teacher", OwnerID: &owner.ID}
+	require.NoError(t, tx.Create(&team).Error)
+	objects := &recordingMaterialObjectStore{}
+	svcs.Materials.objects = objects
+
+	_, err := svcs.Materials.CreateWithFile(
+		context.Background(),
+		outsider.ID,
+		outsider.Role,
+		CreateInput{TeamID: team.ID, Title: "forbidden", OwnerID: outsider.ID},
+		"guide.txt",
+		"text/plain",
+		strings.NewReader("content"),
+	)
+	assert.ErrorIs(t, err, ErrForbidden)
+	assert.Zero(t, objects.putCalls, "unauthorized requests must not reach object storage")
+}
+
 func (a *recordingParseAlerter) AlertParseFailure(context.Context, int64, string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()

@@ -11,11 +11,13 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
 	"learning_buddy/backend/internal/config"
 	"learning_buddy/backend/internal/handler"
+	"learning_buddy/backend/internal/observability"
 	"learning_buddy/backend/internal/repository"
 	"learning_buddy/backend/internal/service"
 )
@@ -47,6 +49,8 @@ func main() {
 	}
 	go svcs.Materials.RunParseDispatcher(context.Background())
 	r := gin.Default()
+	r.Use(observability.HTTPMetrics())
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	handler.Register(r, svcs)
 
 	addr := cfg.Addr

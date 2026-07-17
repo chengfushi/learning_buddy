@@ -8,42 +8,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 
 from pgvector import Vector
+from psycopg2.extras import Json
 
 from db import get_conn, settings
 from embed import embed_text
 from llm import ChunkView, MockLLM, get_llm
+from pipeline import process_document, redact_for_cloud
 from schemas import PlanResult, QuizResult
 
 logger = logging.getLogger("agent.rag")
-
-
-def _chunk_text(text: str, size: int = 600, overlap: int = 80) -> list[str]:
-    text = text or ""
-    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
-    if not paras:
-        paras = [text.strip()]
-    out: list[str] = []
-    buf = ""
-    for p in paras:
-        if buf and len(buf) + len(p) > size:
-            out.append(buf)
-            buf = (buf[-overlap:] + "\n" + p) if overlap else p
-        else:
-            buf = (buf + "\n" + p).strip()
-    if buf:
-        out.append(buf)
-    final: list[str] = []
-    for c in out:
-        if len(c) <= size:
-            final.append(c)
-        else:
-            for i in range(0, max(1, len(c) - size), max(1, size - overlap)):
-                final.append(c[i : i + size])
-    return [c for c in final if c.strip()]
 
 
 def _stale_parse_response(
@@ -64,6 +40,47 @@ def _stale_parse_response(
     return {"material_id": material_id, "chunks": 0, "status": "stale"}
 
 
+def _record_processing_stage(
+    material_id: int,
+    parse_generation: int,
+    stage: str,
+    progress: dict[str, int | str],
+    status: str = "running",
+    error: str | None = None,
+) -> None:
+    """记录当前解析阶段；失败不掩盖主流水线错误。"""
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO rag_processing_runs
+                       (material_id, parse_generation, index_version, stage, status,
+                        parser_version, cleaning_rules_version, progress, error, finished_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                               CASE WHEN %s IN ('done','failed','stale') THEN now() ELSE NULL END)
+                       ON CONFLICT (material_id, parse_generation, index_version) DO UPDATE SET
+                         stage=EXCLUDED.stage, status=EXCLUDED.status, progress=EXCLUDED.progress,
+                         error=EXCLUDED.error, finished_at=EXCLUDED.finished_at""",
+                    (
+                        material_id,
+                        parse_generation,
+                        settings.rag_index_version,
+                        stage,
+                        status,
+                        settings.parser_version,
+                        settings.cleaning_rules_version,
+                        Json(progress),
+                        error,
+                        status,
+                    ),
+                )
+    except Exception as exc:
+        logger.warning(
+            "processing stage persistence degraded",
+            extra={"material_id": material_id, "error_type": type(exc).__name__},
+        )
+
+
 def parse(
     material_id: int,
     parse_generation: int,
@@ -71,8 +88,7 @@ def parse(
     file_type: str,
     storage_key: str,
 ) -> dict:
-    """Parser 任务：仅在 Backend 当前解析代次仍有效时原子替换 chunks。"""
-    del file_type, storage_key
+    """执行 RAG v2 Parser，并仅在当前解析代次仍有效时原子替换影子索引。"""
     # 先做无锁预检，避免已知陈旧请求继续消耗远程 Embedding 配额；写入前仍会在锁内复检。
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -92,11 +108,43 @@ def parse(
                     parse_status,
                 )
 
-    chunks = _chunk_text(content)
-    embedded_chunks = [
-        (piece, embed_text(piece, timeout_s=settings.parser_embedding_timeout_s))
-        for piece in chunks
-    ]
+    try:
+        result = process_document(
+            material_id,
+            parse_generation,
+            content,
+            file_type,
+            storage_key,
+            stage_callback=lambda stage, progress: _record_processing_stage(
+                material_id, parse_generation, stage, progress
+            ),
+        )
+        _record_processing_stage(
+            material_id,
+            parse_generation,
+            "embed",
+            {"chunk_count": len(result.chunks)},
+        )
+        embedded_chunks = [
+            (
+                chunk,
+                embed_text(
+                    redact_for_cloud(chunk.content),
+                    timeout_s=settings.parser_embedding_timeout_s,
+                ),
+            )
+            for chunk in result.chunks
+        ]
+    except Exception as exc:
+        _record_processing_stage(
+            material_id,
+            parse_generation,
+            "pipeline",
+            {},
+            status="failed",
+            error=str(exc)[:2000],
+        )
+        raise
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -104,14 +152,14 @@ def parse(
             # 行锁 + parse_generation/status 阻止超时旧请求覆盖新任务或失败终态。
             cur.execute("SELECT pg_advisory_xact_lock(%s)", (material_id,))
             cur.execute(
-                "SELECT team_id, parse_generation, parse_status "
+                "SELECT team_id, title, parse_generation, parse_status "
                 "FROM materials WHERE id = %s FOR UPDATE",
                 (material_id,),
             )
             row = cur.fetchone()
             if not row:
                 raise ValueError(f"material {material_id} not found")
-            team_id, current_generation, parse_status = row
+            team_id, title, current_generation, parse_status = row
             if current_generation != parse_generation or parse_status != "parsing":
                 return _stale_parse_response(
                     material_id,
@@ -120,21 +168,110 @@ def parse(
                     parse_status,
                 )
 
-            # 幂等：重解析先删旧 chunk，避免重复（R3）
-            cur.execute("DELETE FROM material_chunks WHERE material_id = %s", (material_id,))
-            for idx, (piece, embedding) in enumerate(embedded_chunks):
+            # 仅替换 rag-v2 影子索引；legacy-v1 保留用于原子回滚。
+            cur.execute(
+                "DELETE FROM material_chunks WHERE material_id = %s AND index_version = %s",
+                (material_id, settings.rag_index_version),
+            )
+            cur.execute(
+                "DELETE FROM material_assets WHERE material_id = %s AND index_version = %s",
+                (material_id, settings.rag_index_version),
+            )
+            asset_ids: dict[int, int] = {}
+            for asset_index, asset in enumerate(result.assets):
+                if not asset.storage_key:
+                    continue
                 cur.execute(
-                    """INSERT INTO material_chunks (team_id, material_id, chunk_idx, content, embedding)
-                       VALUES (%s, %s, %s, %s, %s)""",
-                    (team_id, material_id, idx, piece, Vector(embedding)),
+                    """INSERT INTO material_assets
+                       (material_id, parse_generation, index_version, storage_key, sha256,
+                        mime_type, page_number, ocr_text, caption, width, height)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (
+                        material_id,
+                        parse_generation,
+                        settings.rag_index_version,
+                        asset.storage_key,
+                        asset.sha256,
+                        asset.mime_type,
+                        asset.page_number,
+                        asset.ocr_text or None,
+                        asset.caption or None,
+                        asset.width,
+                        asset.height,
+                    ),
+                )
+                asset_ids[asset_index] = cur.fetchone()[0]
+            for chunk, embedding in embedded_chunks:
+                asset_id = (
+                    asset_ids.get(chunk.asset_index) if chunk.asset_index is not None else None
+                )
+                lexical_text = " ".join(
+                    [title, *result.keywords, chunk.heading_path, chunk.lexical_text]
+                ).strip()
+                cur.execute(
+                    """INSERT INTO material_chunks
+                       (team_id, material_id, index_version, kind, chunk_idx, content, embedding,
+                        heading_path, page_number, token_count, lexical_text, asset_id)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (
+                        team_id,
+                        material_id,
+                        settings.rag_index_version,
+                        chunk.kind,
+                        chunk.chunk_idx,
+                        chunk.content,
+                        Vector(embedding),
+                        chunk.heading_path or None,
+                        chunk.page_number,
+                        chunk.token_count,
+                        lexical_text,
+                        asset_id,
+                    ),
                 )
             cur.execute(
-                """UPDATE materials
-                   SET content = %s
-                   WHERE id = %s AND parse_generation = %s AND parse_status = 'parsing'""",
-                (content, material_id, parse_generation),
+                "SELECT EXISTS (SELECT 1 FROM material_chunks "
+                "WHERE material_id = %s AND index_version = 'legacy-v1')",
+                (material_id,),
             )
-    return {"material_id": material_id, "chunks": len(chunks), "status": "done"}
+            has_legacy = bool(cur.fetchone()[0])
+            cur.execute(
+                "SELECT EXISTS (SELECT 1 FROM rag_index_versions "
+                "WHERE version = %s AND status = 'active')",
+                (settings.rag_index_version,),
+            )
+            v2_is_active = bool(cur.fetchone()[0])
+            # building 期间既有资料继续读 legacy；全局激活脚本再一次性切换。
+            # 全新资料没有 legacy，直接使用 v2，避免上传后暂时不可检索。
+            visible_index_version = (
+                settings.rag_index_version if v2_is_active or not has_legacy else "legacy-v1"
+            )
+            cur.execute(
+                """UPDATE materials
+                   SET content = %s, summary = %s, semantic_keywords = %s,
+                       suggested_questions = %s, normalized_storage_key = %s,
+                       parser_version = %s, index_version = %s, cleaning_stats = %s
+                   WHERE id = %s AND parse_generation = %s AND parse_status = 'parsing'""",
+                (
+                    result.markdown,
+                    result.summary,
+                    result.keywords,
+                    result.questions,
+                    result.normalized_storage_key or None,
+                    settings.parser_version,
+                    visible_index_version,
+                    Json(result.cleaning_stats),
+                    material_id,
+                    parse_generation,
+                ),
+            )
+    _record_processing_stage(
+        material_id,
+        parse_generation,
+        "persist",
+        {"chunk_count": len(result.chunks), "asset_count": len(asset_ids)},
+        status="done",
+    )
+    return {"material_id": material_id, "chunks": len(result.chunks), "status": "done"}
 
 
 def run_chat(question: str, chunks: list[ChunkView], history=None) -> tuple[str, list[dict]]:
@@ -184,6 +321,12 @@ def _citations(chunks: list[ChunkView]) -> list[dict]:
             "chapter": c.chapter,
             "chunk_idx": c.chunk_idx,
             "snippet": c.content[:120],
+            "chunk_id": c.chunk_id,
+            "title": c.title,
+            "kind": c.kind,
+            "page_number": c.page_number,
+            "score": c.score,
+            "asset_id": c.asset_id,
         }
         for c in chunks
     ]

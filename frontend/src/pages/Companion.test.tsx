@@ -65,8 +65,23 @@ function deferred<T>(): Deferred<T> {
   };
 }
 
+function createMemoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => [...values.keys()][index] ?? null,
+    removeItem: (key) => values.delete(key),
+    setItem: (key, value) => values.set(key, value),
+  };
+}
+
 describe("Companion", () => {
   beforeEach(() => {
+    vi.stubGlobal("localStorage", createMemoryStorage());
     vi.spyOn(api, "chatStream").mockResolvedValue(undefined);
     vi.spyOn(api, "createPlan").mockResolvedValue({ plan });
     vi.spyOn(api, "createQuiz").mockResolvedValue({ exercises });
@@ -80,6 +95,7 @@ describe("Companion", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("shows material-scoped and general chat placeholders and ignores blank questions", () => {
@@ -92,6 +108,39 @@ describe("Companion", () => {
 
     rerender(<Companion />);
     expect(screen.getByPlaceholderText("向学伴提问…")).not.toBeNull();
+  });
+
+  it("isolates persisted sessions between global and material-scoped chats", async () => {
+    globalThis.localStorage.setItem("lb_chat_session:global", "global-session");
+    globalThis.localStorage.setItem("lb_chat_session:material:31", "material-31-session");
+    const { rerender } = render(<Companion materialId={31} />);
+
+    fireEvent.change(screen.getByPlaceholderText("针对当前资料提问…"), {
+      target: { value: "资料问题" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() =>
+      expect(api.chatStream).toHaveBeenLastCalledWith(
+        {
+          question: "资料问题",
+          material_id: 31,
+          session_id: "material-31-session",
+        },
+        expect.any(Object),
+      ),
+    );
+
+    rerender(<Companion />);
+    fireEvent.change(screen.getByPlaceholderText("向学伴提问…"), {
+      target: { value: "全局问题" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() =>
+      expect(api.chatStream).toHaveBeenLastCalledWith(
+        { question: "全局问题", material_id: undefined, session_id: "global-session" },
+        expect.any(Object),
+      ),
+    );
   });
 
   it("streams tokens and citations, prevents duplicate sends, and restores the composer", async () => {
@@ -126,7 +175,7 @@ describe("Companion", () => {
       if (!handlers) throw new Error("chat handlers unavailable");
       handlers.onToken("牛顿");
       handlers.onToken("第一定律");
-      handlers.onCitations([
+      handlers.onCitations?.([
         { team_id: 1, material_id: 31, chapter: "第一章", chunk_idx: 0 },
         { team_id: 1, material_id: 32, chapter: "", chunk_idx: 1 },
       ]);

@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     # 生产使用 make provision-parser 创建只能读解析状态、回写正文并读写 chunks 的受限凭证。
     pg_dsn: str = "postgres://postgres:postgres@localhost:5432/learning_buddy"
     redis_addr: str = "localhost:6379"
+    redis_timeout_s: float = 0.2
     embedding_dim: int = 1024  # 全库必须一致（engineering-standards R1）；真实 embedding 为 1024 维
     embedding_provider: str = "openai"  # local | openai（接入真实嵌入走 openai 兼容）
 
@@ -39,9 +40,33 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-v4"
 
     agent_shared_secret: str = ""
-    retriever_timeout_s: float = 0.8
+    retriever_timeout_s: float = 0.7
     parser_embedding_timeout_s: float = 30.0
     tutor_timeout_s: float = 30.0
+    query_rewrite_timeout_s: float = 0.8
+    rerank_timeout_s: float = 1.2
+    rerank_api_key: str = ""
+    rerank_base_url: str = ""
+    rerank_model: str = "qwen3-rerank"
+    vision_api_key: str = ""
+    vision_base_url: str = ""
+    vision_model: str = "qwen-vl-ocr"
+    # 原始图片无法在不先做本地 OCR 的情况下应用文本脱敏，因此默认禁止发送到远端。
+    vision_allow_raw_images: bool = False
+    minio_enabled: bool = False
+    minio_endpoint: str = "localhost:9000"
+    minio_access_key: str = "minioadmin"
+    minio_secret_key: str = "minioadmin"
+    minio_secure: bool = False
+    minio_source_bucket: str = "materials-source"
+    minio_derived_bucket: str = "materials-derived"
+    rag_index_version: str = "rag-v2"
+    parser_version: str = "rag-v2"
+    cleaning_rules_version: str = "2026-07-v1"
+    max_chunk_tokens: int = 3000
+    chunk_overlap_tokens: int = 300
+    short_document_chars: int = 5000
+    max_context_tokens: int = 12000
     port: int = 8000
 
 

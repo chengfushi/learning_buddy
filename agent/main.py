@@ -16,16 +16,31 @@ from collections.abc import AsyncIterator
 
 from fastapi import Depends, FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
 from auth import assert_agent_auth_config, require_agent_token
 from db import assert_embedding_dim, health_ok, settings
 from embed import embed_text
 from llm import ChunkView
 from rag import parse, run_chat_resilient, run_plan, run_quiz
-from schemas import ChatRequest, EmbedRequest, EmbedResponse, ParseRequest, PlanRequest, QuizRequest
+from retrieval import analyze_query, rerank
+from schemas import (
+    ChatRequest,
+    EmbedRequest,
+    EmbedResponse,
+    ParseRequest,
+    PlanRequest,
+    QueryAnalysisRequest,
+    QueryAnalysisResponse,
+    QuizRequest,
+    RerankRequest,
+    RerankResponse,
+)
 
 app = FastAPI(title="learning-buddy-agent")
+RAG_STAGE_SECONDS = Histogram("rag_stage_duration_seconds", "RAG stage duration", ["stage"])
+RAG_DEGRADED_TOTAL = Counter("rag_degraded_total", "RAG degraded operations", ["stage"])
 
 
 @app.on_event("startup")
@@ -70,6 +85,12 @@ def health() -> dict:
     return {"status": "ok" if health_ok() else "db_down"}
 
 
+@app.get("/metrics")
+def metrics() -> Response:
+    """导出不带用户或查询标签的 Prometheus 指标。"""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+
 @app.post("/parse", dependencies=[Depends(require_agent_token)])
 def do_parse(req: ParseRequest) -> dict:
     return parse(
@@ -86,9 +107,47 @@ def do_embed(req: EmbedRequest) -> EmbedResponse:
     return EmbedResponse(embedding=embed_text(req.text, timeout_s=settings.retriever_timeout_s))
 
 
+@app.post(
+    "/analyze-query",
+    response_model=QueryAnalysisResponse,
+    dependencies=[Depends(require_agent_token)],
+)
+async def do_analyze_query(req: QueryAnalysisRequest) -> QueryAnalysisResponse:
+    with RAG_STAGE_SECONDS.labels("analyze_query").time():
+        result = await analyze_query(req)
+    if not result.embedding:
+        RAG_DEGRADED_TOTAL.labels("embedding").inc()
+    return result
+
+
+@app.post(
+    "/rerank",
+    response_model=RerankResponse,
+    dependencies=[Depends(require_agent_token)],
+)
+async def do_rerank(req: RerankRequest) -> RerankResponse:
+    with RAG_STAGE_SECONDS.labels("rerank").time():
+        result = await rerank(req)
+    if result.degraded:
+        RAG_DEGRADED_TOTAL.labels("rerank").inc()
+    return result
+
+
 def _chunks(items) -> list[ChunkView]:
     return [
-        ChunkView(item.team_id, item.material_id, item.chapter, item.chunk_idx, item.content)
+        ChunkView(
+            item.team_id,
+            item.material_id,
+            item.chapter,
+            item.chunk_idx,
+            item.content,
+            chunk_id=item.chunk_id,
+            title=item.title,
+            kind=item.kind,
+            page_number=item.page_number,
+            score=item.score,
+            asset_id=item.asset_id,
+        )
         for item in items
     ]
 

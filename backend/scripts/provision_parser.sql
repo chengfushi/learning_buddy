@@ -66,16 +66,26 @@ SELECT format('GRANT CONNECT ON DATABASE %I TO learning_parser', current_databas
 
 GRANT USAGE ON SCHEMA public TO learning_parser;
 
-GRANT SELECT (id, team_id, parse_status, parse_generation)
+GRANT SELECT (id, team_id, title, parse_status, parse_generation, index_version)
     ON TABLE materials TO learning_parser;
-GRANT UPDATE (content)
+GRANT UPDATE (content, summary, semantic_keywords, suggested_questions,
+              normalized_storage_key, parser_version, index_version, cleaning_stats)
     ON TABLE materials TO learning_parser;
 
-GRANT SELECT (material_id)
+GRANT SELECT (material_id, index_version, kind, chunk_idx)
     ON TABLE material_chunks TO learning_parser;
-GRANT INSERT (team_id, material_id, chunk_idx, content, embedding)
+GRANT INSERT (team_id, material_id, chunk_idx, content, embedding, index_version,
+              kind, heading_path, page_number, token_count, lexical_text, asset_id)
     ON TABLE material_chunks TO learning_parser;
 GRANT DELETE
     ON TABLE material_chunks TO learning_parser;
 GRANT USAGE
     ON SEQUENCE material_chunks_id_seq TO learning_parser;
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE material_assets TO learning_parser;
+GRANT USAGE ON SEQUENCE material_assets_id_seq TO learning_parser;
+
+GRANT SELECT, INSERT, UPDATE ON TABLE rag_processing_runs TO learning_parser;
+GRANT USAGE ON SEQUENCE rag_processing_runs_id_seq TO learning_parser;
+
+GRANT SELECT ON TABLE rag_index_versions TO learning_parser;

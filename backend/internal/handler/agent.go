@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"learning_buddy/backend/internal/middleware"
 	"learning_buddy/backend/internal/model"
+	"learning_buddy/backend/internal/observability"
 	"learning_buddy/backend/internal/repository"
 	"learning_buddy/backend/internal/service"
 )
@@ -34,16 +37,7 @@ func (h *Handlers) chat(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	chunks, err := h.Svc.Agent.RetrieveVisibleContext(ctx, uid, req.Question, req.MaterialID, 5)
-	if err != nil {
-		if errors.Is(err, repository.ErrNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "资料不存在"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
+	var err error
 	// 会话：复用或新建
 	sessionID := req.SessionID
 	if sessionID == "" {
@@ -57,9 +51,25 @@ func (h *Handlers) chat(c *gin.Context) {
 			return
 		}
 	}
-	// 历史（用于多轮上下文）
-	msgs, _ := h.Svc.Conversation.Messages(ctx, sessionID, uid)
+	// 历史先完成所有权校验，再用于 Query Rewrite。
+	msgs, historyErr := h.Svc.Conversation.Messages(ctx, sessionID, uid)
+	if historyErr != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
 	history := h.Svc.Conversation.BuildHistory(msgs)
+	prepared, err := h.Svc.Agent.PrepareVisibleContext(
+		ctx, uid, req.Question, history, req.MaterialID,
+	)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "资料不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	observability.ObserveRAG(prepared.StageMS, prepared.DegradedStages, len(prepared.Chunks) == 0)
 
 	// 落 user 消息
 	if _, err := h.Svc.Conversation.AppendMessage(ctx, sessionID, "user", req.Question, nil); err != nil {
@@ -69,11 +79,12 @@ func (h *Handlers) chat(c *gin.Context) {
 
 	// 调 Agent 流式接口
 	stream, err := h.Svc.Agent.ChatStream(ctx, service.ChatRequest{
-		Question:  req.Question,
-		SessionID: sessionID,
-		History:   history,
-		Chunks:    chunks,
-		Service:   "chat",
+		Question:       req.Question,
+		SessionID:      sessionID,
+		History:        history,
+		Chunks:         prepared.Chunks,
+		Service:        "chat",
+		RetrievalQuery: prepared.RetrievalQuery,
 	})
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Agent 服务不可用：" + err.Error()})
@@ -92,6 +103,15 @@ func (h *Handlers) chat(c *gin.Context) {
 	c.Writer.WriteHeader(http.StatusOK)
 
 	flusher, _ := c.Writer.(http.Flusher)
+	meta, _ := json.Marshal(gin.H{
+		"type": "meta", "session_id": sessionID, "trace_id": stream.TraceID,
+		"rewritten_query": prepared.RetrievalQuery,
+		"rewrite_applied": prepared.RewriteApplied,
+	})
+	_, _ = c.Writer.WriteString("data: " + string(meta) + "\n\n")
+	if flusher != nil {
+		flusher.Flush()
+	}
 
 	var answer strings.Builder
 	var citations []service.Citation
@@ -127,13 +147,10 @@ func (h *Handlers) chat(c *gin.Context) {
 				flusher.Flush()
 			}
 		case "done":
-			citations = ev.Citations
+			citations = validateCitations(ev.Citations, prepared.Chunks)
 			promptTokens = ev.PromptTokens
 			completionTokens = ev.CompletionTokens
-			_, _ = c.Writer.WriteString("data: " + payload + "\n\n")
-			if flusher != nil {
-				flusher.Flush()
-			}
+			// done 由 Backend 在回答、追踪落库后补充 message_id 再转发。
 		case "error":
 			_, _ = c.Writer.WriteString("data: " + payload + "\n\n")
 			if flusher != nil {
@@ -143,14 +160,47 @@ func (h *Handlers) chat(c *gin.Context) {
 	}
 
 	// 收尾：落 assistant 消息 + token 用量
+	var assistantMessage *model.AgentMessage
 	if answer.Len() > 0 {
-		citeJSON, _ := json.Marshal(citations)
-		_ = h.Svc.Repos.DB.WithContext(ctx).Create(&model.AgentMessage{
-			SessionID: sessionID,
-			Role:      "assistant",
-			Content:   answer.String(),
-			Citations: citeJSON,
-		}).Error
+		assistantMessage, err = h.Svc.Conversation.AppendMessage(
+			ctx, sessionID, "assistant", answer.String(), citations,
+		)
+		if err != nil {
+			_, _ = c.Writer.WriteString("data: {\"type\":\"error\",\"text\":\"回答保存失败\"}\n\n")
+		}
+	}
+	traceID := stream.TraceID
+	if traceID == "" {
+		traceID = uuid.NewString()
+	}
+	runID := uuid.NewString()
+	stageJSON, _ := json.Marshal(prepared.StageMS)
+	run := &model.RAGRun{
+		ID: runID, UserID: uid, SessionID: &sessionID, TraceID: traceID,
+		OriginalQuery: req.Question, RewrittenQuery: prepared.RetrievalQuery,
+		RewriteApplied: prepared.RewriteApplied, IndexVersion: prepared.IndexVersion,
+		StageDurations: stageJSON, DegradedStages: model.StringArray(prepared.DegradedStages),
+	}
+	if assistantMessage != nil {
+		run.MessageID = &assistantMessage.ID
+	}
+	selected := make(map[int64]bool, len(prepared.Chunks))
+	for _, chunk := range prepared.Chunks {
+		selected[chunk.ChunkID] = true
+	}
+	hits := make([]model.RAGRunHit, 0, len(prepared.Candidates))
+	for rank, candidate := range prepared.Candidates {
+		chunkID := candidate.ID
+		hits = append(hits, model.RAGRunHit{
+			RunID: runID, ChunkID: &chunkID, MaterialID: candidate.MaterialID, Rank: rank + 1,
+			VectorScore: candidate.VectorScore, LexicalScore: candidate.LexicalScore,
+			RRFScore: candidate.RRFScore, RerankScore: candidate.RerankScore,
+			Selected: selected[candidate.ID],
+		})
+	}
+	if err := h.Svc.Repos.RecordRAGRun(ctx, run, hits); err != nil {
+		// 追踪失败不打断用户回答。
+		_ = err
 	}
 	if promptTokens > 0 || completionTokens > 0 {
 		_ = h.Svc.Repos.RecordTokenUsage(ctx, &model.TokenUsage{
@@ -161,11 +211,97 @@ func (h *Handlers) chat(c *gin.Context) {
 			TotalTokens:      promptTokens + completionTokens,
 		})
 	}
+	donePayload, _ := json.Marshal(gin.H{
+		"type": "done", "citations": citations, "session_id": sessionID,
+		"message_id": func() int64 {
+			if assistantMessage != nil {
+				return assistantMessage.ID
+			}
+			return 0
+		}(),
+		"stage_ms": prepared.StageMS, "degraded_stages": prepared.DegradedStages,
+	})
+	_, _ = c.Writer.WriteString("data: " + string(donePayload) + "\n\n")
 	// 结束事件
 	_, _ = c.Writer.WriteString("data: {\"type\":\"end\"}\n\n")
 	if flusher != nil {
 		flusher.Flush()
 	}
+}
+
+// validateCitations never trusts IDs returned by the model service. Every citation is rebuilt
+// from the exact permission-checked context sent to Agent; unknown or altered IDs are discarded.
+func validateCitations(raw []service.Citation, chunks []service.Chunk) []service.Citation {
+	allowed := make(map[int64]service.Chunk, len(chunks))
+	for _, chunk := range chunks {
+		allowed[chunk.ChunkID] = chunk
+	}
+	validated := make([]service.Citation, 0, len(raw))
+	seen := make(map[int64]bool, len(raw))
+	for _, citation := range raw {
+		if citation.ChunkID == nil || seen[*citation.ChunkID] {
+			continue
+		}
+		chunk, ok := allowed[*citation.ChunkID]
+		if !ok || chunk.MaterialID != citation.MaterialID {
+			continue
+		}
+		chunkID := chunk.ChunkID
+		validated = append(validated, service.Citation{
+			TeamID: chunk.TeamID, MaterialID: chunk.MaterialID, Chapter: chunk.Chapter,
+			ChunkIdx: chunk.ChunkIdx, ChunkID: &chunkID, Title: chunk.Title,
+			Snippet: truncateRunes(chunk.Content, 120), Kind: chunk.Kind,
+			PageNumber: chunk.PageNumber, Score: chunk.Score, AssetID: chunk.AssetID,
+		})
+		seen[chunkID] = true
+	}
+	return validated
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
+func (h *Handlers) feedback(c *gin.Context) {
+	uid := middleware.CtxUserID(c)
+	messageID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || messageID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效回答"})
+		return
+	}
+	var req struct {
+		Rating string  `json:"rating"`
+		Reason *string `json:"reason"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || (req.Rating != "up" && req.Rating != "down") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "rating 必须为 up 或 down"})
+		return
+	}
+	if req.Reason != nil {
+		trimmed := strings.TrimSpace(*req.Reason)
+		if len([]rune(trimmed)) > 500 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "反馈原因不能超过 500 字"})
+			return
+		}
+		req.Reason = &trimmed
+	}
+	item, err := h.Svc.Repos.UpsertMessageFeedback(
+		c.Request.Context(), uid, messageID, req.Rating, req.Reason,
+	)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "回答不存在"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存反馈失败"})
+		return
+	}
+	observability.RecordFeedback(req.Rating)
+	c.JSON(http.StatusOK, gin.H{"feedback": item})
 }
 
 func (h *Handlers) listSessions(c *gin.Context) {

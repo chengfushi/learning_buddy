@@ -1,15 +1,40 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, type Citation, type Exercise, type StudyPlan } from "../api";
 
 interface Msg {
-  role: string;
+  role: "user" | "assistant";
   content: string;
   citations?: Citation[];
+  messageId?: number;
+  feedback?: "up" | "down";
 }
 
-export default function Companion({ materialId }: { materialId?: number }) {
+function sessionStorageKey(materialId?: number): string {
+  return materialId === undefined
+    ? "lb_chat_session:global"
+    : `lb_chat_session:material:${materialId}`;
+}
+
+function storedSession(materialId?: number): string | undefined {
+  const scoped = globalThis.localStorage?.getItem(sessionStorageKey(materialId));
+  if (scoped) return scoped;
+  // 只为旧版全局会话提供一次兼容读取，绝不把它带入资料作用域。
+  return materialId === undefined
+    ? (globalThis.localStorage?.getItem("lb_chat_session") ?? undefined)
+    : undefined;
+}
+
+export default function Companion({
+  materialId,
+  onOpenMaterial,
+}: {
+  materialId?: number;
+  onOpenMaterial?: (materialId: number) => void;
+}) {
   const [tab, setTab] = useState<"chat" | "plan" | "quiz">("chat");
   const [messages, setMessages] = useState<Msg[]>([]);
+  const [sessionId, setSessionId] = useState<string | undefined>(() => storedSession(materialId));
+  const [rewrittenQuery, setRewrittenQuery] = useState("");
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -26,52 +51,79 @@ export default function Companion({ materialId }: { materialId?: number }) {
   const [quizBusy, setQuizBusy] = useState(false);
   const [answeringId, setAnsweringId] = useState<number | null>(null);
 
+  useEffect(() => {
+    setSessionId(storedSession(materialId));
+    setMessages([]);
+    setRewrittenQuery("");
+  }, [materialId]);
+
+  const updateLastAssistant = (update: Partial<Msg>) =>
+    setMessages((current) => {
+      const copy = [...current];
+      copy[copy.length - 1] = { ...copy[copy.length - 1], ...update };
+      return copy;
+    });
+
   const ask = async () => {
     const q = input.trim();
     if (!q || busy) return;
     setInput("");
     setBusy(true);
     setErr("");
+    setRewrittenQuery("");
     setMessages((m) => [...m, { role: "user", content: q }, { role: "assistant", content: "" }]);
     let acc = "";
     try {
       await api.chatStream(
-        { question: q, material_id: materialId },
+        { question: q, material_id: materialId, session_id: sessionId },
         {
-          onToken: (t) => {
-            acc += t;
-            setMessages((m) => {
-              const copy = [...m];
-              copy[copy.length - 1] = { role: "assistant", content: acc };
-              return copy;
-            });
+          onToken: (text) => {
+            acc += text;
+            updateLastAssistant({ content: acc });
           },
-          onCitations: (c) =>
-            setMessages((m) => {
-              const copy = [...m];
-              copy[copy.length - 1] = { ...copy[copy.length - 1], citations: c };
-              return copy;
-            }),
+          onCitations: (citations) => updateLastAssistant({ citations }),
+          onMeta: (meta) => {
+            setSessionId(meta.session_id);
+            globalThis.localStorage?.setItem(sessionStorageKey(materialId), meta.session_id);
+            if (meta.rewrite_applied) setRewrittenQuery(meta.rewritten_query);
+          },
+          onDone: (done) => {
+            setSessionId(done.session_id);
+            globalThis.localStorage?.setItem(sessionStorageKey(materialId), done.session_id);
+            updateLastAssistant({ citations: done.citations, messageId: done.message_id });
+          },
           onEnd: () => setBusy(false),
-          onError: (msg) => {
-            setMessages((m) => {
-              const copy = [...m];
-              copy[copy.length - 1] = { role: "assistant", content: `出错了：${msg}` };
-              return copy;
-            });
+          onError: (message) => {
+            updateLastAssistant({ content: `出错了：${message}` });
             setBusy(false);
           },
         },
       );
     } catch (ex) {
-      const message = ex instanceof Error ? ex.message : "对话请求失败";
-      setMessages((m) => {
-        const copy = [...m];
-        copy[copy.length - 1] = { role: "assistant", content: `出错了：${message}` };
-        return copy;
+      updateLastAssistant({
+        content: `出错了：${ex instanceof Error ? ex.message : "对话请求失败"}`,
       });
     } finally {
       setBusy(false);
+    }
+  };
+
+  const feedback = async (index: number, rating: "up" | "down") => {
+    const message = messages[index];
+    if (!message.messageId) return;
+    const reason =
+      rating === "down" ? window.prompt("哪里没有帮到你？（选填，最多 500 字）") : undefined;
+    if (reason !== null && reason !== undefined && reason.length > 500) {
+      setErr("反馈原因不能超过 500 字");
+      return;
+    }
+    try {
+      await api.submitFeedback(message.messageId, rating, reason ?? undefined);
+      setMessages((current) =>
+        current.map((item, i) => (i === index ? { ...item, feedback: rating } : item)),
+      );
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : "反馈提交失败");
     }
   };
 
@@ -80,8 +132,7 @@ export default function Companion({ materialId }: { materialId?: number }) {
     setErr("");
     setPlanBusy(true);
     try {
-      const r = await api.createPlan(goal, deadline || undefined);
-      setPlan(r.plan);
+      setPlan((await api.createPlan(goal, deadline || undefined)).plan);
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : "计划生成失败");
     } finally {
@@ -94,8 +145,7 @@ export default function Companion({ materialId }: { materialId?: number }) {
     setErr("");
     setQuizBusy(true);
     try {
-      const r = await api.createQuiz(topic, count, materialId);
-      setExercises(r.exercises);
+      setExercises((await api.createQuiz(topic, count, materialId)).exercises);
       setResults({});
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : "测评生成失败");
@@ -104,13 +154,16 @@ export default function Companion({ materialId }: { materialId?: number }) {
     }
   };
 
-  const answer = async (ex: Exercise, choice: string) => {
-    if (answeringId !== null || results[ex.ID] !== undefined) return;
+  const answer = async (exercise: Exercise, choice: string) => {
+    if (answeringId !== null || results[exercise.ID] !== undefined) return;
     setErr("");
-    setAnsweringId(ex.ID);
+    setAnsweringId(exercise.ID);
     try {
-      const r = await api.answerQuiz(ex.ID, choice);
-      setResults((prev) => ({ ...prev, [ex.ID]: r.is_correct }));
+      const result = await api.answerQuiz(exercise.ID, choice);
+      setResults((prev) => ({
+        ...prev,
+        [exercise.ID]: result.is_correct,
+      }));
     } catch (error) {
       setErr(error instanceof Error ? error.message : "答案提交失败");
     } finally {
@@ -135,19 +188,47 @@ export default function Companion({ materialId }: { materialId?: number }) {
 
       {tab === "chat" && (
         <div className="chat">
+          {rewrittenQuery && <div className="query-rewrite">已理解为：{rewrittenQuery}</div>}
           <div className="messages">
-            {messages.map((m, i) => (
-              <div key={i} className={m.role === "user" ? "bubble user" : "bubble"}>
-                <div className="bubble-text">{m.content || "…"}</div>
-                {m.citations && m.citations.length > 0 && (
+            {messages.map((message, index) => (
+              <div key={index} className={message.role === "user" ? "bubble user" : "bubble"}>
+                <div className="bubble-text">{message.content || "…"}</div>
+                {!!message.citations?.length && (
                   <div className="citations">
                     引用：
-                    {m.citations.map((c, j) => (
-                      <span key={j} className="cite">
-                        资料#{c.material_id}
-                        {c.chapter ? `·${c.chapter}` : ""}
-                      </span>
+                    {message.citations.map((citation, citationIndex) => (
+                      <button
+                        key={citation.chunk_id ?? citationIndex}
+                        className="cite"
+                        onClick={() => onOpenMaterial?.(citation.material_id)}
+                      >
+                        {citation.title || `资料#${citation.material_id}`}
+                        {citation.page_number
+                          ? `·第 ${citation.page_number} 页`
+                          : citation.chapter
+                            ? `·${citation.chapter}`
+                            : ""}
+                      </button>
                     ))}
+                  </div>
+                )}
+                {message.role === "assistant" && message.messageId && (
+                  <div className="feedback-controls">
+                    <span>这个回答有帮助吗？</span>
+                    <button
+                      aria-label="点赞"
+                      className={message.feedback === "up" ? "selected" : ""}
+                      onClick={() => feedback(index, "up")}
+                    >
+                      👍
+                    </button>
+                    <button
+                      aria-label="点踩"
+                      className={message.feedback === "down" ? "selected" : ""}
+                      onClick={() => feedback(index, "down")}
+                    >
+                      👎
+                    </button>
                   </div>
                 )}
               </div>
@@ -185,9 +266,9 @@ export default function Companion({ materialId }: { materialId?: number }) {
             <div className="card">
               <h3>{plan.Title}</h3>
               <ol>
-                {plan.Items?.map((it, i) => (
+                {plan.Items?.map((item, i) => (
                   <li key={i}>
-                    <b>{it.date}</b>：{it.task}
+                    <b>{item.date}</b>：{item.task}
                   </li>
                 ))}
               </ol>
@@ -215,24 +296,24 @@ export default function Companion({ materialId }: { materialId?: number }) {
               {quizBusy ? "生成中…" : "生成测评"}
             </button>
           </div>
-          {exercises.map((ex) => (
-            <div key={ex.ID} className="card">
-              <div className="title">{ex.Question}</div>
+          {exercises.map((exercise) => (
+            <div key={exercise.ID} className="card">
+              <div className="title">{exercise.Question}</div>
               <div className="options">
-                {(ex.Options ?? []).map((opt, i) => (
+                {(exercise.Options ?? []).map((option, i) => (
                   <button
                     key={i}
-                    className={results[ex.ID] !== undefined ? "opt done" : "opt"}
-                    onClick={() => answer(ex, String.fromCharCode("A".charCodeAt(0) + i))}
-                    disabled={answeringId !== null || results[ex.ID] !== undefined}
+                    className={results[exercise.ID] !== undefined ? "opt done" : "opt"}
+                    onClick={() => answer(exercise, String.fromCharCode("A".charCodeAt(0) + i))}
+                    disabled={answeringId !== null || results[exercise.ID] !== undefined}
                   >
-                    {opt}
+                    {option}
                   </button>
                 ))}
               </div>
-              {results[ex.ID] !== undefined && (
-                <div className={results[ex.ID] ? "ok" : "bad"}>
-                  {results[ex.ID] ? "✓ 回答正确" : "✗ 回答错误"}
+              {results[exercise.ID] !== undefined && (
+                <div className={results[exercise.ID] ? "ok" : "bad"}>
+                  {results[exercise.ID] ? "✓ 回答正确" : "✗ 回答错误"}
                 </div>
               )}
             </div>

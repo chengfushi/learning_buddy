@@ -46,6 +46,8 @@
 
 ## 快速开始 / Quick Start
 
+RAG v2 的迁移、影子评测、灰度切换与回滚步骤见 [生产运行手册](docs/rag-v2-production.md)。
+
 ### 前置依赖 / Prerequisites
 
 | 依赖 | 版本要求 | 说明 |

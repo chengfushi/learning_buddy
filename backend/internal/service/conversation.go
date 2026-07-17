@@ -43,8 +43,15 @@ func (s *ConversationService) ListSessions(ctx context.Context, userID int64) ([
 // GetSession 取会话元信息。
 func (s *ConversationService) GetSession(ctx context.Context, sessionID string, userID int64) (*model.AgentSession, error) {
 	var sess model.AgentSession
-	if err := s.repos.DB.WithContext(ctx).First(&sess, "id = ? AND user_id = ?", sessionID, userID).Error; err != nil {
-		return nil, err
+	result := s.repos.DB.WithContext(ctx).
+		Where("id = ? AND user_id = ?", sessionID, userID).
+		Limit(1).
+		Find(&sess)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return nil, repository.ErrNotFound
 	}
 	return &sess, nil
 }
@@ -76,10 +83,17 @@ func (s *ConversationService) AppendMessage(ctx context.Context, sessionID, role
 
 // Citation 引用来源（对应 agent_messages.citations JSONB）。
 type Citation struct {
-	TeamID     int64  `json:"team_id"`
-	MaterialID int64  `json:"material_id"`
-	Chapter    string `json:"chapter"`
-	ChunkIdx   int    `json:"chunk_idx"`
+	TeamID     int64   `json:"team_id"`
+	MaterialID int64   `json:"material_id"`
+	Chapter    string  `json:"chapter"`
+	ChunkIdx   int     `json:"chunk_idx"`
+	ChunkID    *int64  `json:"chunk_id,omitempty"`
+	Title      string  `json:"title,omitempty"`
+	Snippet    string  `json:"snippet,omitempty"`
+	Kind       string  `json:"kind,omitempty"`
+	PageNumber *int    `json:"page_number,omitempty"`
+	Score      float64 `json:"score,omitempty"`
+	AssetID    *int64  `json:"asset_id,omitempty"`
 }
 
 // BuildHistory 由历史消息构造发给 Agent 的精简历史（最多最近 10 轮）。
