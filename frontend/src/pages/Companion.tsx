@@ -1,5 +1,12 @@
-import { useEffect, useState } from "react";
-import { api, type Citation, type Exercise, type StudyPlan } from "../api";
+import { useEffect, useRef, useState } from "react";
+import {
+  api,
+  type AgentMessage,
+  type AgentSession,
+  type Citation,
+  type Exercise,
+  type StudyPlan,
+} from "../api";
 import type { MaterialNavigationTarget } from "../material-navigation";
 
 interface Msg {
@@ -31,6 +38,26 @@ function validStageTimings(stageMs?: Record<string, number>): [string, number][]
   );
 }
 
+function sessionsForScope(sessions: AgentSession[], materialId?: number): AgentSession[] {
+  return sessions.filter((session) =>
+    materialId === undefined ? session.MaterialID === null : session.MaterialID === materialId,
+  );
+}
+
+function restoredMessages(messages: AgentMessage[]): Msg[] {
+  return messages.flatMap((message) => {
+    if (message.Role !== "user" && message.Role !== "assistant") return [];
+    return [
+      {
+        role: message.Role,
+        content: message.Content,
+        citations: message.Citations,
+        messageId: message.Role === "assistant" ? message.ID : undefined,
+      },
+    ];
+  });
+}
+
 function sessionStorageKey(materialId?: number): string {
   return materialId === undefined
     ? "lb_chat_session:global"
@@ -60,6 +87,12 @@ export default function Companion({
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [sessions, setSessions] = useState<AgentSession[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [sessionsErr, setSessionsErr] = useState("");
+  const historyRequestRef = useRef(0);
+  const chatRequestRef = useRef(0);
 
   const [goal, setGoal] = useState("");
   const [deadline, setDeadline] = useState("");
@@ -74,10 +107,87 @@ export default function Companion({
   const [answeringId, setAnsweringId] = useState<number | null>(null);
 
   useEffect(() => {
-    setSessionId(storedSession(materialId));
+    const persistedSession = storedSession(materialId);
+    const historyRequest = ++historyRequestRef.current;
+    chatRequestRef.current += 1;
+    let active = true;
+    setBusy(false);
+    setErr("");
+    setSessionId(persistedSession);
     setMessages([]);
     setRewrittenQuery("");
+    setSessions([]);
+    setSessionsErr("");
+    setSessionsLoading(true);
+    setHistoryLoading(false);
+    api
+      .listSessions()
+      .then(async (result) => {
+        if (!active) return;
+        const scoped = sessionsForScope(result.sessions, materialId);
+        setSessions(scoped);
+        if (!persistedSession || !scoped.some((session) => session.ID === persistedSession)) {
+          if (persistedSession) {
+            globalThis.localStorage?.removeItem(sessionStorageKey(materialId));
+            setSessionId(undefined);
+          }
+          return;
+        }
+        if (historyRequest !== historyRequestRef.current) return;
+        setHistoryLoading(true);
+        const history = await api.getSession(persistedSession);
+        if (!active || historyRequest !== historyRequestRef.current) return;
+        setMessages(restoredMessages(history.messages));
+      })
+      .catch((error) => {
+        if (active && historyRequest === historyRequestRef.current) {
+          setSessionsErr(error instanceof Error ? error.message : "会话历史加载失败");
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setSessionsLoading(false);
+          if (historyRequest === historyRequestRef.current) setHistoryLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+      historyRequestRef.current += 1;
+      chatRequestRef.current += 1;
+    };
   }, [materialId]);
+
+  const openSession = async (selectedSession: AgentSession) => {
+    if (busy || historyLoading) return;
+    const historyRequest = ++historyRequestRef.current;
+    setHistoryLoading(true);
+    setSessionsErr("");
+    try {
+      const history = await api.getSession(selectedSession.ID);
+      if (historyRequest !== historyRequestRef.current) return;
+      setMessages(restoredMessages(history.messages));
+      setSessionId(history.session_id);
+      setRewrittenQuery("");
+      globalThis.localStorage?.setItem(sessionStorageKey(materialId), history.session_id);
+    } catch (error) {
+      if (historyRequest === historyRequestRef.current) {
+        setSessionsErr(error instanceof Error ? error.message : "会话历史加载失败");
+      }
+    } finally {
+      if (historyRequest === historyRequestRef.current) setHistoryLoading(false);
+    }
+  };
+
+  const startNewConversation = () => {
+    if (busy) return;
+    historyRequestRef.current += 1;
+    setHistoryLoading(false);
+    setSessionsErr("");
+    setSessionId(undefined);
+    setMessages([]);
+    setRewrittenQuery("");
+    globalThis.localStorage?.removeItem(sessionStorageKey(materialId));
+  };
 
   const updateLastAssistant = (update: Partial<Msg>) =>
     setMessages((current) => {
@@ -89,6 +199,10 @@ export default function Companion({
   const ask = async () => {
     const q = input.trim();
     if (!q || busy) return;
+    historyRequestRef.current += 1;
+    setHistoryLoading(false);
+    const chatRequest = ++chatRequestRef.current;
+    const isCurrentRequest = () => chatRequest === chatRequestRef.current;
     setInput("");
     setBusy(true);
     setErr("");
@@ -100,16 +214,21 @@ export default function Companion({
         { question: q, material_id: materialId, session_id: sessionId },
         {
           onToken: (text) => {
+            if (!isCurrentRequest()) return;
             acc += text;
             updateLastAssistant({ content: acc });
           },
-          onCitations: (citations) => updateLastAssistant({ citations }),
+          onCitations: (citations) => {
+            if (isCurrentRequest()) updateLastAssistant({ citations });
+          },
           onMeta: (meta) => {
+            if (!isCurrentRequest()) return;
             setSessionId(meta.session_id);
             globalThis.localStorage?.setItem(sessionStorageKey(materialId), meta.session_id);
             if (meta.rewrite_applied) setRewrittenQuery(meta.rewritten_query);
           },
           onDone: (done) => {
+            if (!isCurrentRequest()) return;
             setSessionId(done.session_id);
             globalThis.localStorage?.setItem(sessionStorageKey(materialId), done.session_id);
             updateLastAssistant({
@@ -118,20 +237,33 @@ export default function Companion({
               stageMs: done.stage_ms,
               degradedStages: done.degraded_stages,
             });
+            api
+              .listSessions()
+              .then((result) => {
+                if (isCurrentRequest()) {
+                  setSessions(sessionsForScope(result.sessions, materialId));
+                }
+              })
+              .catch(() => undefined);
           },
-          onEnd: () => setBusy(false),
+          onEnd: () => {
+            if (isCurrentRequest()) setBusy(false);
+          },
           onError: (message) => {
+            if (!isCurrentRequest()) return;
             updateLastAssistant({ content: `出错了：${message}` });
             setBusy(false);
           },
         },
       );
     } catch (ex) {
-      updateLastAssistant({
-        content: `出错了：${ex instanceof Error ? ex.message : "对话请求失败"}`,
-      });
+      if (isCurrentRequest()) {
+        updateLastAssistant({
+          content: `出错了：${ex instanceof Error ? ex.message : "对话请求失败"}`,
+        });
+      }
     } finally {
-      setBusy(false);
+      if (isCurrentRequest()) setBusy(false);
     }
   };
 
@@ -215,8 +347,36 @@ export default function Companion({
 
       {tab === "chat" && (
         <div className="chat">
+          <div className="chat-history-bar">
+            <details>
+              <summary>历史会话（{sessions.length}）</summary>
+              <div className="session-list">
+                {sessionsLoading && <div className="muted small">正在加载会话…</div>}
+                {sessionsErr && <div className="err small">{sessionsErr}</div>}
+                {!sessionsLoading && !sessionsErr && sessions.length === 0 && (
+                  <div className="muted small">当前范围还没有历史会话。</div>
+                )}
+                {sessions.map((session) => (
+                  <button
+                    key={session.ID}
+                    className={session.ID === sessionId ? "session-on" : ""}
+                    onClick={() => openSession(session)}
+                    disabled={busy || historyLoading}
+                  >
+                    {session.Title || "未命名会话"}
+                  </button>
+                ))}
+              </div>
+            </details>
+            <button className="ghost" onClick={startNewConversation} disabled={busy}>
+              新对话
+            </button>
+          </div>
           {rewrittenQuery && <div className="query-rewrite">已理解为：{rewrittenQuery}</div>}
           <div className="messages">
+            {!sessionsLoading && !historyLoading && messages.length === 0 && (
+              <div className="muted small">输入问题开始一段新对话。</div>
+            )}
             {messages.map((message, index) => (
               <div key={index} className={message.role === "user" ? "bubble user" : "bubble"}>
                 <div className="bubble-text">{message.content || "…"}</div>
@@ -292,9 +452,9 @@ export default function Companion({
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && ask()}
-              disabled={busy}
+              disabled={busy || historyLoading}
             />
-            <button className="primary" onClick={ask} disabled={busy}>
+            <button className="primary" onClick={ask} disabled={busy || historyLoading}>
               {busy ? "思考中…" : "发送"}
             </button>
           </div>

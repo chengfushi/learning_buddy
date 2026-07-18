@@ -216,6 +216,8 @@ The system has three roles, with permissions and material ownership bounded by "
 | POST | `/api/agent/plan` | Generate study plan (writes `study_plans`) | Yes |
 | POST | `/api/agent/quiz` | Generate quiz (writes `exercises`) | Yes |
 | GET | `/api/agent/sessions` | My session list | Yes |
+| GET | `/api/agent/sessions/:id` | Restore structured messages and citations from my session | Yes |
+| PUT | `/api/agent/messages/:id/feedback` | Idempotently rate an assistant answer in my session | Yes |
 
 > All write endpoints are RBAC-constrained. Backend repository applies the canonical visibility predicate and pgvector top-k before sending authorized chunks to Agent. Agent Parser holds only the minimum database privileges needed for parsing and cannot read user, membership, or authentication tables.
 

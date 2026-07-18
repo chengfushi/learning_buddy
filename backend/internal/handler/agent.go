@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -324,5 +326,39 @@ func (h *Handlers) getSession(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"session_id": sid, "messages": msgs})
+	c.JSON(http.StatusOK, gin.H{"session_id": sid, "messages": sessionMessageViews(msgs)})
+}
+
+type sessionMessageView struct {
+	ID        int64
+	Role      string
+	Content   string
+	Citations []service.Citation
+	CreatedAt time.Time
+}
+
+func sessionMessageViews(messages []model.AgentMessage) []sessionMessageView {
+	views := make([]sessionMessageView, 0, len(messages))
+	for _, message := range messages {
+		citations := make([]service.Citation, 0)
+		if len(message.Citations) > 0 {
+			if err := json.Unmarshal(message.Citations, &citations); err != nil {
+				slog.Warn(
+					"conversation citations decode failed",
+					"session_id", message.SessionID,
+					"message_id", message.ID,
+					"err", err,
+				)
+				citations = make([]service.Citation, 0)
+			}
+		}
+		if citations == nil {
+			citations = make([]service.Citation, 0)
+		}
+		views = append(views, sessionMessageView{
+			ID: message.ID, Role: message.Role, Content: message.Content,
+			Citations: citations, CreatedAt: message.CreatedAt,
+		})
+	}
+	return views
 }

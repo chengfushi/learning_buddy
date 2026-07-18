@@ -215,6 +215,8 @@ handler (Gin) → service (业务/RBAC/team) → repository (GORM) → PostgreSQ
 | POST | `/api/agent/plan` | 生成学习计划（落 `study_plans`） | 是 |
 | POST | `/api/agent/quiz` | 生成测评（落 `exercises`） | 是 |
 | GET | `/api/agent/sessions` | 我的会话列表 | 是 |
+| GET | `/api/agent/sessions/:id` | 恢复本人会话的结构化消息与引用 | 是 |
+| PUT | `/api/agent/messages/:id/feedback` | 幂等评价本人会话中的助手回答 | 是 |
 
 > 所有写接口受 RBAC 约束；`/api/agent/*` 先由 Backend repository 应用统一可见性谓词并执行 pgvector top-k，再向 Agent 下发已授权 chunks。Agent Parser 仅持解析所需的最小数据库权限，不可读取用户、成员或认证表。
 

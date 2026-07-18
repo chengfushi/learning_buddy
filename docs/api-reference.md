@@ -1,6 +1,6 @@
 # 智能学伴系统 · API 接口文档
 
-> 版本：v0.3 · 最后更新：2026-07-12
+> 版本：v0.4 · 最后更新：2026-07-18
 > 对应代码：`backend/internal/handler/` · `backend/internal/model/` · `backend/internal/middleware/`
 
 ---
@@ -14,7 +14,7 @@
 | [资料 / Materials](#3-资料--materials) | 6 | 资料 CRUD、可见性过滤、异步解析与失败重试 |
 | [笔记 / Notes](#4-笔记--notes) | 4 | 阅读器笔记与标注 |
 | [学习记录 / Learning](#5-学习记录--learning) | 3 | 学习时长、进度记录、进度聚合 |
-| [Agent / AI](#6-agent--ai) | 6 | 流式答疑、学习计划、智能测评、会话管理 |
+| [Agent / AI](#6-agent--ai) | 7 | 流式答疑、学习计划、智能测评、会话与反馈管理 |
 
 ---
 
@@ -1212,6 +1212,7 @@ curl -N \
 |------|------|
 | 400 | 缺少 question |
 | 401 | 未登录 |
+| 404 | 会话不存在、会话资料作用域不匹配，或指定资料不可见 |
 | 502 | Agent 服务不可用 |
 
 ---
@@ -1234,12 +1235,15 @@ curl -N \
     {
       "ID": "550e8400-e29b-41d4-a716-446655440000",
       "UserID": 1,
+      "MaterialID": 10,
       "Title": "一元二次方程的求根公式是什么？",
       "CreatedAt": "2026-07-12T16:30:00Z"
     }
   ]
 }
 ```
+
+`MaterialID` 为 `null` 表示全局会话；非空时该会话永久绑定对应资料，不能作为其他资料或全局对话的 `session_id` 复用。
 
 #### 错误码
 
@@ -1251,7 +1255,7 @@ curl -N \
 
 ### GET /api/agent/sessions/:id
 
-获取指定会话的完整消息历史。
+获取指定会话的完整消息历史。`Citations` 始终为数组；无法解码的旧引用会降级为空数组，不影响正文恢复。
 
 **鉴权**：是（所有角色，会话归属用户）
 
@@ -1273,18 +1277,24 @@ curl -N \
   "messages": [
     {
       "ID": 1,
-      "SessionID": "550e8400-e29b-41d4-a716-446655440000",
       "Role": "user",
       "Content": "一元二次方程的求根公式是什么？",
-      "Citations": null,
+      "Citations": [],
       "CreatedAt": "2026-07-12T16:30:00Z"
     },
     {
       "ID": 2,
-      "SessionID": "550e8400-e29b-41d4-a716-446655440000",
       "Role": "assistant",
       "Content": "一元二次方程 $ax^2+bx+c=0$ 的求根公式为...",
-      "Citations": [{"team_id":2,"material_id":10,"chapter":"第二章"}],
+      "Citations": [{
+        "team_id": 2,
+        "material_id": 10,
+        "chapter": "第二章",
+        "chunk_idx": 3,
+        "chunk_id": 103,
+        "title": "一元二次方程",
+        "page_number": 5
+      }],
       "CreatedAt": "2026-07-12T16:30:05Z"
     }
   ]
@@ -1297,6 +1307,35 @@ curl -N \
 |------|------|
 | 401 | 未登录 |
 | 404 | 会话不存在 |
+
+---
+
+### PUT /api/agent/messages/:id/feedback
+
+幂等提交或更新对单条助手回答的评价。只能评价当前用户自己会话中的 `assistant` 消息；点踩原因去除首尾空白后最多 500 个 Unicode 字符。
+
+**鉴权**：是（所有角色，消息所属会话必须归属当前用户）
+
+**幂等**：✅ 是（按 `message_id + user_id` 更新）
+
+**Request Body（JSON）**
+
+```json
+{
+  "rating": "down",
+  "reason": "引用没有覆盖配置参数"
+}
+```
+
+`rating` 只能为 `up` 或 `down`；`reason` 可省略。
+
+#### 错误码
+
+| HTTP | 说明 |
+|------|------|
+| 400 | 消息 ID、rating 或反馈原因不合法 |
+| 401 | 未登录 |
+| 404 | 回答不存在或不属于当前用户 |
 
 ---
 

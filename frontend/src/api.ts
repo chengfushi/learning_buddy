@@ -143,7 +143,16 @@ export interface Exercise {
 export interface AgentSession {
   ID: string;
   UserID: number;
+  MaterialID: number | null;
   Title: string | null;
+  CreatedAt: string;
+}
+
+export interface AgentMessage {
+  ID: number;
+  Role: "user" | "assistant" | "system";
+  Content: string;
+  Citations: Citation[];
   CreatedAt: string;
 }
 
@@ -173,6 +182,28 @@ const CitationSchema: z.ZodType<Citation> = z.object({
   page_number: z.number().int().positive().optional(),
   score: z.number().optional(),
   asset_id: z.number().int().positive().optional(),
+});
+
+const AgentSessionSchema: z.ZodType<AgentSession> = z.object({
+  ID: z.string().min(1),
+  UserID: z.number().int().positive(),
+  MaterialID: z.number().int().positive().nullable(),
+  Title: z.string().nullable(),
+  CreatedAt: z.string(),
+});
+
+const AgentMessageSchema: z.ZodType<AgentMessage> = z.object({
+  ID: z.number().int().positive(),
+  Role: z.enum(["user", "assistant", "system"]),
+  Content: z.string(),
+  Citations: z.array(CitationSchema),
+  CreatedAt: z.string(),
+});
+
+const AgentSessionsResponseSchema = z.object({ sessions: z.array(AgentSessionSchema) });
+const AgentSessionResponseSchema = z.object({
+  session_id: z.string().min(1),
+  messages: z.array(AgentMessageSchema),
 });
 
 const ChatEventSchema = z.discriminatedUnion("type", [
@@ -462,7 +493,14 @@ export const api = {
       `/agent/quiz/${id}/answer`,
       { choice },
     ),
-  listSessions: () => request<{ sessions: AgentSession[] }>("GET", "/agent/sessions"),
+  listSessions: () => request("GET", "/agent/sessions", undefined, AgentSessionsResponseSchema),
+  getSession: (sessionId: string) =>
+    request(
+      "GET",
+      `/agent/sessions/${encodeURIComponent(sessionId)}`,
+      undefined,
+      AgentSessionResponseSchema,
+    ),
   submitFeedback: (messageId: number, rating: "up" | "down", reason?: string) =>
     request<{ feedback: { ID: number; Rating: string; Reason: string | null } }>(
       "PUT",

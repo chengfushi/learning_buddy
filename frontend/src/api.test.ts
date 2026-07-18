@@ -64,6 +64,95 @@ describe("api", () => {
     await expect(api.listTeamMaterials(7)).rejects.toThrow();
   });
 
+  it("validates scoped session summaries and structured message history", async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            sessions: [
+              {
+                ID: "session-31",
+                UserID: 9,
+                MaterialID: 31,
+                Title: "资料会话",
+                CreatedAt: "2026-07-18T08:00:00Z",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: "session-31",
+            messages: [
+              {
+                ID: 81,
+                Role: "assistant",
+                Content: "有据回答",
+                Citations: [
+                  {
+                    team_id: 7,
+                    material_id: 31,
+                    chapter: "第一章",
+                    chunk_idx: 0,
+                    chunk_id: 301,
+                    title: "函数基础",
+                    page_number: 2,
+                  },
+                ],
+                CreatedAt: "2026-07-18T08:00:01Z",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const listed = await api.listSessions();
+    const history = await api.getSession("session-31");
+
+    expect(listed.sessions[0]).toMatchObject({ ID: "session-31", MaterialID: 31 });
+    expect(history.messages[0].Citations[0]).toMatchObject({
+      material_id: 31,
+      chunk_id: 301,
+      page_number: 2,
+    });
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/agent/sessions/session-31",
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("rejects malformed session history instead of rendering untrusted citation shapes", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            session_id: "session-31",
+            messages: [
+              {
+                ID: 81,
+                Role: "assistant",
+                Content: "回答",
+                Citations: "not-an-array",
+                CreatedAt: "2026-07-18T08:00:01Z",
+              },
+            ],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+
+    await expect(api.getSession("session-31")).rejects.toThrow();
+  });
+
   it("keeps the SSE access token in the Authorization header and out of the URL", async () => {
     const token = "sensitive-sse-token";
     vi.mocked(localStorage.getItem).mockReturnValue(token);
