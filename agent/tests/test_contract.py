@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
+import rag
 from auth import AGENT_TOKEN_HEADER
 from db import settings
 from schemas import (
@@ -136,3 +137,29 @@ def test_contract_matches_fastapi_responses(
     done = next(event for event in events if event["type"] == "done")
     assert answer == chat_response["answer"]
     assert done["citations"] == chat_response["citations"]
+
+
+def test_chat_without_evidence_streams_grounded_refusal(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_llm() -> object:
+        raise AssertionError("tutor must not be called without evidence")
+
+    monkeypatch.setattr(rag, "get_llm", unexpected_llm)
+    response = client.post(
+        "/chat",
+        json={"question": "没有召回时也回答吗？", "chunks": [], "service": "chat"},
+        headers={AGENT_TOKEN_HEADER: TEST_SECRET},
+    )
+
+    assert response.status_code == 200
+    events = [
+        json.loads(line.removeprefix("data: "))
+        for line in response.text.splitlines()
+        if line.startswith("data: ")
+    ]
+    answer = "".join(event.get("text", "") for event in events if event["type"] == "token")
+    assert answer == "当前知识库未找到依据"
+    assert next(event for event in events if event["type"] == "citations")["items"] == []
+    assert next(event for event in events if event["type"] == "done")["citations"] == []

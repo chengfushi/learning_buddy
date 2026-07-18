@@ -39,7 +39,7 @@ class _StructuredLLM:
 
 
 @pytest.mark.anyio
-async def test_empty_backend_context_still_generates_answer(
+async def test_empty_backend_context_refuses_without_calling_tutor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     llm = _RecordingLLM()
@@ -47,8 +47,34 @@ async def test_empty_backend_context_still_generates_answer(
 
     answer, citations = await rag.run_chat_resilient("问题", [], trace_id="trace-empty")
 
-    assert answer == "fallback-compatible answer"
+    assert answer == "当前知识库未找到依据"
     assert citations == []
+    assert llm.chunks is None
+
+
+@pytest.mark.anyio
+async def test_blank_chunks_do_not_count_as_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    llm = _RecordingLLM()
+    monkeypatch.setattr(rag, "get_llm", lambda: llm)
+
+    answer, citations = await rag.run_chat_resilient(
+        "问题", [ChunkView(1, 2, "章节", 0, "  \n\t")], trace_id="trace-blank"
+    )
+
+    assert answer == "当前知识库未找到依据"
+    assert citations == []
+    assert llm.chunks is None
+
+
+def test_sync_chat_refuses_without_calling_tutor(monkeypatch: pytest.MonkeyPatch) -> None:
+    def unexpected_llm() -> object:
+        raise AssertionError("tutor must not be called")
+
+    monkeypatch.setattr(rag, "get_llm", unexpected_llm)
+
+    assert rag.run_chat("问题", []) == ("当前知识库未找到依据", [])
 
 
 @pytest.mark.anyio
