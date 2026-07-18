@@ -57,6 +57,27 @@ def test_follow_up_without_history_skips_rewrite() -> None:
     assert retrieval._needs_rewrite("它支持哪些版本？", []) is False
 
 
+def test_rerank_document_is_truncated_to_configured_token_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "rerank_max_document_tokens", 4)
+
+    truncated = retrieval._truncate_rerank_document("配置参数说明文档")
+
+    assert truncated == "配置参数"
+    assert retrieval.estimate_tokens(truncated) == 4
+
+
+def test_rerank_document_also_has_a_conservative_character_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "rerank_max_document_tokens", 4)
+
+    truncated = retrieval._truncate_rerank_document("a" * 100)
+
+    assert truncated == "a" * 16
+
+
 def _install_rewrite(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Callable[[], int]:

@@ -11,7 +11,7 @@ import httpx
 from cache import cache_key, get_json, set_json
 from db import settings
 from embed import embed_text
-from pipeline import redact_for_cloud
+from pipeline import estimate_tokens, redact_for_cloud
 from schemas import (
     ChatHistory,
     QueryAnalysisRequest,
@@ -166,6 +166,22 @@ def _local_rerank(req: RerankRequest) -> RerankResponse:
     return RerankResponse(items=items, model="rrf-order-fallback", degraded=True)
 
 
+def _truncate_rerank_document(text: str) -> str:
+    """按模型 Token 上限保守截断，避免一个超长旧块拖垮整次重排。"""
+    limit = max(1, settings.rerank_max_document_tokens)
+    max_chars = limit * 4
+    if len(text) <= max_chars and estimate_tokens(text) <= limit:
+        return text
+    low, high = 0, min(len(text), max_chars)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if estimate_tokens(text[:middle]) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low]
+
+
 def _valid_cached_rerank(req: RerankRequest, response: RerankResponse) -> RerankResponse | None:
     expected = min(req.top_n, len(req.candidates))
     candidate_ids = {candidate.chunk_id for candidate in req.candidates}
@@ -247,7 +263,8 @@ async def rerank(req: RerankRequest) -> RerankResponse:
                     "model": settings.rerank_model,
                     "query": redact_for_cloud(req.query),
                     "documents": [
-                        redact_for_cloud(item.content)[:16000] for item in req.candidates
+                        _truncate_rerank_document(redact_for_cloud(item.content))
+                        for item in req.candidates
                     ],
                     "top_n": req.top_n,
                     "instruct": "Given a technical question, retrieve passages that directly answer it.",
