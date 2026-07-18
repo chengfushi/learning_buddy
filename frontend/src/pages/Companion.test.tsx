@@ -150,6 +150,9 @@ describe("Companion", () => {
     vi.spyOn(api, "chatStream").mockResolvedValue(undefined);
     vi.spyOn(api, "listSessions").mockResolvedValue({ sessions: [] });
     vi.spyOn(api, "getSession").mockResolvedValue({ session_id: "empty-session", messages: [] });
+    vi.spyOn(api, "submitFeedback").mockResolvedValue({
+      feedback: { ID: 1, Rating: "up", Reason: null },
+    });
     vi.spyOn(api, "createPlan").mockResolvedValue({ plan });
     vi.spyOn(api, "createQuiz").mockResolvedValue({ exercises });
     vi.spyOn(api, "answerQuiz").mockResolvedValue({
@@ -279,6 +282,76 @@ describe("Companion", () => {
         expect.any(Object),
       ),
     );
+  });
+
+  it("serializes feedback, honors prompt cancellation, and counts Unicode characters", async () => {
+    const firstFeedback = deferred<{
+      feedback: { ID: number; Rating: string; Reason: string | null };
+    }>();
+    vi.mocked(api.listSessions).mockResolvedValue({ sessions });
+    vi.mocked(api.getSession).mockResolvedValue({
+      session_id: "material-31-session",
+      messages: restoredHistory,
+    });
+    vi.mocked(api.submitFeedback)
+      .mockReturnValueOnce(firstFeedback.promise)
+      .mockResolvedValue({ feedback: { ID: 1, Rating: "down", Reason: null } });
+    const prompt = vi
+      .spyOn(window, "prompt")
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce("😀".repeat(500))
+      .mockReturnValueOnce("😀".repeat(501));
+    globalThis.localStorage.setItem("lb_chat_session:material:31", "material-31-session");
+    render(<Companion materialId={31} />);
+    await screen.findByText("历史回答");
+
+    fireEvent.click(screen.getByRole("button", { name: "点踩" }));
+    expect(prompt).toHaveBeenCalledOnce();
+    expect(api.submitFeedback).not.toHaveBeenCalled();
+
+    const up = screen.getByRole("button", { name: "点赞" }) as HTMLButtonElement;
+    fireEvent.click(up);
+    fireEvent.click(up);
+    expect(api.submitFeedback).toHaveBeenCalledOnce();
+    expect(up.disabled).toBe(true);
+    await act(async () =>
+      firstFeedback.resolve({ feedback: { ID: 1, Rating: "up", Reason: null } }),
+    );
+    await waitFor(() => expect(up.className).toBe("selected"));
+
+    const down = screen.getByRole("button", { name: "点踩" }) as HTMLButtonElement;
+    fireEvent.click(down);
+    await waitFor(() =>
+      expect(api.submitFeedback).toHaveBeenLastCalledWith(81, "down", "😀".repeat(500)),
+    );
+    await waitFor(() => expect(down.disabled).toBe(false));
+    fireEvent.click(down);
+    expect(await screen.findByText("反馈原因不能超过 500 字")).not.toBeNull();
+    expect(api.submitFeedback).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-enables feedback after a failed request and only marks a successful retry", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue({ sessions });
+    vi.mocked(api.getSession).mockResolvedValue({
+      session_id: "material-31-session",
+      messages: restoredHistory,
+    });
+    vi.mocked(api.submitFeedback)
+      .mockRejectedValueOnce(new Error("反馈服务不可用"))
+      .mockResolvedValueOnce({ feedback: { ID: 1, Rating: "up", Reason: null } });
+    globalThis.localStorage.setItem("lb_chat_session:material:31", "material-31-session");
+    render(<Companion materialId={31} />);
+    await screen.findByText("历史回答");
+
+    const up = screen.getByRole("button", { name: "点赞" }) as HTMLButtonElement;
+    fireEvent.click(up);
+    expect(await screen.findByText("反馈服务不可用")).not.toBeNull();
+    expect(up.disabled).toBe(false);
+    expect(up.className).toBe("");
+
+    fireEvent.click(up);
+    await waitFor(() => expect(up.className).toBe("selected"));
+    expect(api.submitFeedback).toHaveBeenCalledTimes(2);
   });
 
   it("does not let a cancelled history request overwrite a new conversation", async () => {

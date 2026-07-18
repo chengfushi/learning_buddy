@@ -93,6 +93,8 @@ export default function Companion({
   const [sessionsErr, setSessionsErr] = useState("");
   const historyRequestRef = useRef(0);
   const chatRequestRef = useRef(0);
+  const feedbackPendingRef = useRef(new Set<number>());
+  const [feedbackPending, setFeedbackPending] = useState<Set<number>>(() => new Set());
 
   const [goal, setGoal] = useState("");
   const [deadline, setDeadline] = useState("");
@@ -267,22 +269,31 @@ export default function Companion({
     }
   };
 
-  const feedback = async (index: number, rating: "up" | "down") => {
-    const message = messages[index];
-    if (!message.messageId) return;
+  const feedback = async (messageId: number, rating: "up" | "down") => {
+    if (feedbackPendingRef.current.has(messageId)) return;
     const reason =
       rating === "down" ? window.prompt("哪里没有帮到你？（选填，最多 500 字）") : undefined;
-    if (reason !== null && reason !== undefined && reason.length > 500) {
+    if (rating === "down" && reason === null) return;
+    const normalizedReason = reason?.trim() || undefined;
+    if (normalizedReason !== undefined && [...normalizedReason].length > 500) {
       setErr("反馈原因不能超过 500 字");
       return;
     }
+    feedbackPendingRef.current.add(messageId);
+    setFeedbackPending(new Set(feedbackPendingRef.current));
+    setErr("");
     try {
-      await api.submitFeedback(message.messageId, rating, reason ?? undefined);
+      await api.submitFeedback(messageId, rating, normalizedReason);
       setMessages((current) =>
-        current.map((item, i) => (i === index ? { ...item, feedback: rating } : item)),
+        current.map((item) =>
+          item.messageId === messageId ? { ...item, feedback: rating } : item,
+        ),
       );
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : "反馈提交失败");
+    } finally {
+      feedbackPendingRef.current.delete(messageId);
+      setFeedbackPending(new Set(feedbackPendingRef.current));
     }
   };
 
@@ -430,14 +441,16 @@ export default function Companion({
                     <button
                       aria-label="点赞"
                       className={message.feedback === "up" ? "selected" : ""}
-                      onClick={() => feedback(index, "up")}
+                      disabled={feedbackPending.has(message.messageId)}
+                      onClick={() => feedback(message.messageId as number, "up")}
                     >
                       👍
                     </button>
                     <button
                       aria-label="点踩"
                       className={message.feedback === "down" ? "selected" : ""}
-                      onClick={() => feedback(index, "down")}
+                      disabled={feedbackPending.has(message.messageId)}
+                      onClick={() => feedback(message.messageId as number, "down")}
                     >
                       👎
                     </button>
