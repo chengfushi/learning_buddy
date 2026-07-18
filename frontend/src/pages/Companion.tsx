@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Citation, type Exercise, type StudyPlan } from "../api";
+import type { MaterialNavigationTarget } from "../material-navigation";
 
 interface Msg {
   role: "user" | "assistant";
@@ -29,7 +30,7 @@ export default function Companion({
   onOpenMaterial,
 }: {
   materialId?: number;
-  onOpenMaterial?: (materialId: number) => void;
+  onOpenMaterial?: (target: MaterialNavigationTarget) => void;
 }) {
   const [tab, setTab] = useState<"chat" | "plan" | "quiz">("chat");
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -200,7 +201,13 @@ export default function Companion({
                       <button
                         key={citation.chunk_id ?? citationIndex}
                         className="cite"
-                        onClick={() => onOpenMaterial?.(citation.material_id)}
+                        onClick={() =>
+                          onOpenMaterial?.({
+                            materialId: citation.material_id,
+                            pageNumber: citation.page_number,
+                            assetId: citation.asset_id,
+                          })
+                        }
                       >
                         {citation.title || `资料#${citation.material_id}`}
                         {citation.page_number

@@ -145,12 +145,13 @@ describe("Companion", () => {
 
   it("streams tokens and citations, prevents duplicate sends, and restores the composer", async () => {
     const stream = deferred<void>();
+    const onOpenMaterial = vi.fn();
     let handlers: Parameters<typeof api.chatStream>[1] | undefined;
     vi.mocked(api.chatStream).mockImplementation((_, nextHandlers) => {
       handlers = nextHandlers;
       return stream.promise;
     });
-    render(<Companion materialId={31} />);
+    render(<Companion materialId={31} onOpenMaterial={onOpenMaterial} />);
     const input = screen.getByPlaceholderText("针对当前资料提问…") as HTMLInputElement;
     fireEvent.change(input, { target: { value: "  什么是惯性？  " } });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -176,7 +177,14 @@ describe("Companion", () => {
       handlers.onToken("牛顿");
       handlers.onToken("第一定律");
       handlers.onCitations?.([
-        { team_id: 1, material_id: 31, chapter: "第一章", chunk_idx: 0 },
+        {
+          team_id: 1,
+          material_id: 31,
+          chapter: "第一章",
+          chunk_idx: 0,
+          page_number: 3,
+          asset_id: 81,
+        },
         { team_id: 1, material_id: 32, chapter: "", chunk_idx: 1 },
       ]);
       handlers.onEnd();
@@ -184,7 +192,8 @@ describe("Companion", () => {
     });
 
     await waitFor(() => expect(screen.getByText("牛顿第一定律")).not.toBeNull());
-    expect(screen.getByText("资料#31·第一章")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "资料#31·第 3 页" }));
+    expect(onOpenMaterial).toHaveBeenCalledWith({ materialId: 31, pageNumber: 3, assetId: 81 });
     expect(screen.getByText("资料#32")).not.toBeNull();
     expect(screen.getByRole("button", { name: "发送" })).not.toBeNull();
     expect(input.disabled).toBe(false);

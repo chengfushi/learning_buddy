@@ -384,6 +384,12 @@ textarea {
   font-size: 12px;
   margin-top: 4px;
 }
+.citation-focus {
+  border-radius: 8px;
+  outline: 3px solid var(--brand);
+  outline-offset: 4px;
+  scroll-margin-block: 24px;
+}
 .composer {
   display: flex;
   gap: 8px;

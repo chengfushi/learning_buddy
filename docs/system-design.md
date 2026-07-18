@@ -112,7 +112,7 @@
 
 ### 5.3 AI 辅助学习模式
 
-- **智能答疑**：选中文本/整页提问，Backend repository 先在用户可见范围内完成 RAG 检索，Agent 仅基于已授权 chunks 回答并附引用（标明来源 team / 资料）。
+- **智能答疑**：选中文本/整页提问，Backend repository 先在用户可见范围内完成 RAG 检索，Agent 仅基于已授权 chunks 回答并附引用；引用可打开资料并定位到对应 PDF 页码或图片资产。
 - **学习规划**：Planner Agent 按目标与期限生成计划。
 - **智能测评**：Evaluator Agent 生成测验并批改。
 - **对话式伴学**：多轮对话、记忆上下文、可回溯历史会话。

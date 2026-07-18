@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, type Material, type MaterialNote } from "../api";
+import { api, type Material, type MaterialAsset, type MaterialNote } from "../api";
 import Reader from "./Reader";
 
 const material: Material = {
@@ -57,6 +57,12 @@ describe("Reader", () => {
     vi.spyOn(api, "getMaterial").mockResolvedValue({ material });
     vi.spyOn(api, "listNotes").mockResolvedValue({ notes: [note] });
     vi.spyOn(api, "createNote").mockResolvedValue({ note });
+    vi.spyOn(api, "listMaterialAssets").mockResolvedValue({ assets: [] });
+    vi.spyOn(api, "getMaterialSourceURL").mockResolvedValue({ url: "", expires_in: 0 });
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: vi.fn(),
+    });
   });
 
   afterEach(() => {
@@ -153,6 +159,61 @@ describe("Reader", () => {
     expect(screen.queryByRole("heading", { name: material.Title })).toBeNull();
     expect(api.getMaterial).toHaveBeenLastCalledWith(second.ID);
     expect(api.listNotes).toHaveBeenLastCalledWith(second.ID);
+  });
+
+  it("scrolls and focuses the cited PDF page heading", async () => {
+    vi.mocked(api.getMaterial).mockResolvedValue({
+      material: { ...material, Content: "## 第 3 页\n\n惯性定律正文" },
+    });
+    const focusSpy = vi.spyOn(HTMLElement.prototype, "focus");
+    render(
+      <Reader
+        materialId={material.ID}
+        focus={{ pageNumber: 3 }}
+        onBack={vi.fn()}
+        onAsk={vi.fn()}
+      />,
+    );
+
+    const heading = await screen.findByRole("heading", { name: "第 3 页" });
+    await waitFor(() =>
+      expect(vi.mocked(heading.scrollIntoView)).toHaveBeenCalledWith({
+        behavior: "smooth",
+        block: "center",
+      }),
+    );
+    expect(heading.id).toBe("page-3");
+    expect(heading.className).toBe("citation-focus");
+    expect(focusSpy.mock.contexts).toContain(heading);
+  });
+
+  it("prefers the cited image asset over its page heading", async () => {
+    const asset: MaterialAsset = {
+      id: 81,
+      page_number: 3,
+      caption: "惯性实验示意图",
+      ocr_text: null,
+      url: "https://assets.test/81.png",
+    };
+    vi.mocked(api.getMaterial).mockResolvedValue({
+      material: { ...material, Content: "## 第 3 页\n\n惯性定律正文" },
+    });
+    vi.mocked(api.listMaterialAssets).mockResolvedValue({ assets: [asset] });
+    render(
+      <Reader
+        materialId={material.ID}
+        focus={{ pageNumber: 3, assetId: asset.id }}
+        onBack={vi.fn()}
+        onAsk={vi.fn()}
+      />,
+    );
+
+    const image = await screen.findByRole("img", { name: asset.caption as string });
+    const figure = image.closest("figure");
+    if (!figure) throw new Error("asset figure not found");
+    await waitFor(() => expect(vi.mocked(figure.scrollIntoView)).toHaveBeenCalledOnce());
+    expect(figure.id).toBe("asset-81");
+    expect(figure.className).toBe("citation-focus");
   });
 
   it.each([
