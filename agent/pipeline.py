@@ -16,6 +16,8 @@ import fitz
 import httpx
 import yaml
 from docx import Document
+from docx.document import Document as DocxDocument
+from docx.oxml.xmlchemy import BaseOxmlElement
 
 from db import settings
 from storage import read_source, write_derived
@@ -35,6 +37,7 @@ class ExtractedAsset:
     caption: str = ""
     width: int | None = None
     height: int | None = None
+    heading_path: str = ""
 
 
 @dataclass
@@ -115,9 +118,36 @@ def estimate_tokens(text: str) -> int:
     return cjk + latin
 
 
+def _docx_assets_in_element(
+    element: BaseOxmlElement, document: DocxDocument, heading_path: str
+) -> list[ExtractedAsset]:
+    """按 XML 出现顺序提取当前段落或表格中的内嵌图片。"""
+    assets: list[ExtractedAsset] = []
+    for blip in element.xpath(".//a:blip"):
+        relation_id = blip.get(
+            "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed"
+        )
+        if not relation_id or relation_id not in document.part.rels:
+            continue
+        relation = document.part.rels[relation_id]
+        if "image" not in relation.reltype:
+            continue
+        part = relation.target_part
+        assets.append(
+            ExtractedAsset(
+                data=part.blob,
+                mime_type=part.content_type,
+                heading_path=heading_path,
+            )
+        )
+    return assets
+
+
 def _extract_docx(blob: bytes) -> tuple[str, list[ExtractedAsset]]:
     document = Document(io.BytesIO(blob))
     blocks: list[str] = []
+    assets: list[ExtractedAsset] = []
+    heading_stack: list[str] = []
     # 遍历 body 子节点，避免把所有表格错误地移到正文末尾。
     paragraphs = iter(document.paragraphs)
     tables = iter(document.tables)
@@ -133,24 +163,21 @@ def _extract_docx(blob: bytes) -> tuple[str, list[ExtractedAsset]]:
                 blocks.append("| " + " | ".join(rows[0]) + " |")
                 blocks.append("| " + " | ".join("---" for _ in rows[0]) + " |")
                 blocks.extend("| " + " | ".join(row) + " |" for row in rows[1:])
+            assets.extend(_docx_assets_in_element(element, document, " > ".join(heading_stack)))
             continue
         else:
             continue
         text = paragraph.text.strip()
-        if not text:
-            continue
         style = paragraph.style.name.lower() if paragraph.style else ""
-        if style.startswith("heading"):
+        if text and style.startswith("heading"):
             level = re.findall(r"\d+", style)
-            blocks.append(f"{'#' * int(level[0] if level else 2)} {text}")
-        else:
+            heading_level = int(level[0] if level else 2)
+            heading_stack = heading_stack[: max(0, heading_level - 1)]
+            heading_stack.append(text)
+            blocks.append(f"{'#' * heading_level} {text}")
+        elif text:
             blocks.append(text)
-    assets: list[ExtractedAsset] = []
-    for relation in document.part.rels.values():
-        if "image" not in relation.reltype:
-            continue
-        part = relation.target_part
-        assets.append(ExtractedAsset(data=part.blob, mime_type=part.content_type))
+        assets.extend(_docx_assets_in_element(element, document, " > ".join(heading_stack)))
     return "\n\n".join(blocks), assets
 
 
@@ -168,6 +195,7 @@ def _extract_pdf(blob: bytes) -> tuple[str, list[ExtractedAsset]]:
                     data=pixmap.tobytes("png"),
                     mime_type="image/png",
                     page_number=page_index + 1,
+                    heading_path=f"第 {page_index + 1} 页",
                 )
             )
         try:
@@ -192,6 +220,7 @@ def _extract_pdf(blob: bytes) -> tuple[str, list[ExtractedAsset]]:
                     data=extracted["image"],
                     mime_type=f"image/{extracted['ext']}",
                     page_number=page_index + 1,
+                    heading_path=f"第 {page_index + 1} 页",
                 )
             )
     document.close()
@@ -394,12 +423,16 @@ def process_document(
     summary, keywords, questions = enrich_metadata(markdown)
     notify("assets", {"asset_count": len(assets)})
     unique_assets: list[ExtractedAsset] = []
-    seen_assets: set[str] = set()
+    seen_assets: dict[str, ExtractedAsset] = {}
     for asset in assets:
         asset.sha256 = hashlib.sha256(asset.data).hexdigest()
-        if asset.sha256 in seen_assets:
+        existing = seen_assets.get(asset.sha256)
+        if existing is not None:
+            paths = [part for part in existing.heading_path.split(" | ") if part]
+            if asset.heading_path and asset.heading_path not in paths:
+                existing.heading_path = " | ".join([*paths, asset.heading_path])
             continue
-        seen_assets.add(asset.sha256)
+        seen_assets[asset.sha256] = asset
         extension = asset.mime_type.split("/")[-1].replace("jpeg", "jpg")
         asset.storage_key = f"assets/{asset.sha256}.{extension}"
         try:
@@ -440,6 +473,7 @@ def process_document(
                     signal,
                     page_number=asset.page_number,
                     asset_index=index,
+                    heading_path=asset.heading_path,
                 )
             )
     return PipelineResult(
