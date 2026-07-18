@@ -93,4 +93,50 @@ describe("api", () => {
     expect(init?.headers).toMatchObject({ Authorization: `Bearer ${token}` });
     expect(onEnd).toHaveBeenCalledOnce();
   });
+
+  it("validates chunked SSE events and flushes a final line without a newline", async () => {
+    const encoder = new TextEncoder();
+    const payload = [
+      'data: {"type":"token","text":"回答"}\n\n',
+      'data: {"type":"done","session_id":"bad","stage_ms":{"retrieve":"slow"}}\n\n',
+      'data: {"type":"error","message":"模型超时"}\n\n',
+      'data: {"type":"done","session_id":"session-1","message_id":9,',
+      '"citations":[],"stage_ms":{"retrieve":80},"degraded_stages":["rerank"]}',
+    ].join("");
+    const bytes = encoder.encode(payload);
+    const splitAt = payload.indexOf("答") + 1;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(bytes.slice(0, splitAt));
+        controller.enqueue(bytes.slice(splitAt, bytes.length - 11));
+        controller.enqueue(bytes.slice(bytes.length - 11));
+        controller.close();
+      },
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(
+          new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+        ),
+    );
+    const onToken = vi.fn();
+    const onDone = vi.fn();
+    const onError = vi.fn();
+
+    await api.chatStream({ question: "测试分块" }, { onToken, onDone, onEnd: vi.fn(), onError });
+
+    expect(onToken).toHaveBeenCalledWith("回答");
+    expect(onDone).toHaveBeenCalledOnce();
+    expect(onDone).toHaveBeenCalledWith({
+      session_id: "session-1",
+      message_id: 9,
+      citations: [],
+      stage_ms: { retrieve: 80 },
+      degraded_stages: ["rerank"],
+    });
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith("模型超时");
+  });
 });

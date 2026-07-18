@@ -161,6 +161,45 @@ export interface Citation {
   asset_id?: number;
 }
 
+const CitationSchema: z.ZodType<Citation> = z.object({
+  team_id: z.number().int(),
+  material_id: z.number().int().positive(),
+  chapter: z.string(),
+  chunk_idx: z.number().int().nonnegative(),
+  chunk_id: z.number().int().positive().optional(),
+  title: z.string().optional(),
+  snippet: z.string().optional(),
+  kind: z.string().optional(),
+  page_number: z.number().int().positive().optional(),
+  score: z.number().optional(),
+  asset_id: z.number().int().positive().optional(),
+});
+
+const ChatEventSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("token"), text: z.string() }),
+  z.object({
+    type: z.literal("meta"),
+    session_id: z.string().min(1),
+    trace_id: z.string().default(""),
+    rewritten_query: z.string().default(""),
+    rewrite_applied: z.boolean().default(false),
+  }),
+  z.object({
+    type: z.literal("done"),
+    session_id: z.string().min(1),
+    message_id: z.number().int().nonnegative().default(0),
+    citations: z.array(CitationSchema).default([]),
+    stage_ms: z.record(z.number().nonnegative()).default({}),
+    degraded_stages: z.array(z.string()).default([]),
+  }),
+  z.object({
+    type: z.literal("error"),
+    text: z.string().default(""),
+    message: z.string().default(""),
+  }),
+  z.object({ type: z.literal("end") }),
+]);
+
 export interface MaterialAsset {
   id: number;
   page_number: number | null;
@@ -306,6 +345,9 @@ async function streamPost(
       if (trimmed.startsWith("data:")) onLine(trimmed.slice(5).trim());
     }
   }
+  buffer += decoder.decode();
+  const trailing = buffer.trim();
+  if (trailing.startsWith("data:")) onLine(trailing.slice(5).trim());
 }
 
 export const api = {
@@ -445,36 +487,27 @@ export const api = {
       await streamPost("/agent/chat", req, (payload) => {
         if (!payload) return;
         try {
-          const ev = JSON.parse(payload) as {
-            type: string;
-            text?: string;
-            citations?: Citation[];
-            session_id?: string;
-            trace_id?: string;
-            rewritten_query?: string;
-            rewrite_applied?: boolean;
-            message_id?: number;
-            stage_ms?: Record<string, number>;
-            degraded_stages?: string[];
-          };
+          const parsed = ChatEventSchema.safeParse(JSON.parse(payload) as unknown);
+          if (!parsed.success) return;
+          const ev = parsed.data;
           if (ev.type === "token" && ev.text) handlers.onToken(ev.text);
-          else if (ev.type === "meta" && ev.session_id) {
+          else if (ev.type === "meta") {
             handlers.onMeta?.({
               session_id: ev.session_id,
-              trace_id: ev.trace_id ?? "",
-              rewritten_query: ev.rewritten_query ?? "",
-              rewrite_applied: ev.rewrite_applied ?? false,
+              trace_id: ev.trace_id,
+              rewritten_query: ev.rewritten_query,
+              rewrite_applied: ev.rewrite_applied,
             });
-          } else if (ev.type === "done" && ev.session_id) {
-            handlers.onCitations?.(ev.citations ?? []);
+          } else if (ev.type === "done") {
+            handlers.onCitations?.(ev.citations);
             handlers.onDone?.({
               session_id: ev.session_id,
-              message_id: ev.message_id ?? 0,
-              citations: ev.citations ?? [],
-              stage_ms: ev.stage_ms ?? {},
-              degraded_stages: ev.degraded_stages ?? [],
+              message_id: ev.message_id,
+              citations: ev.citations,
+              stage_ms: ev.stage_ms,
+              degraded_stages: ev.degraded_stages,
             });
-          } else if (ev.type === "error" && ev.text) handlers.onError(ev.text);
+          } else if (ev.type === "error") handlers.onError(ev.text || ev.message || "对话请求失败");
         } catch {
           /* 忽略无法解析的行 */
         }
