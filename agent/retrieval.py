@@ -21,8 +21,13 @@ from schemas import (
     RerankResponse,
 )
 
-_FOLLOW_UP = re.compile(
-    r"^(它|他|她|这个|那个|上述|前面|其中|该|那)(的|是|如何|怎么)|^(怎么|如何)(配|做|设置|处理)[？?]?$"
+_CONTEXTUAL_REFERENCE = re.compile(
+    r"^(?:那|那么|然后|它|他|她|其|这个|那个|这些|那些|上述|上面|前面|其中|"
+    r"(?:该|此)(?:参数|配置|功能|服务|接口|模块|组件|系统|方案|文档|命令|错误|问题|"
+    r"规则|步骤|版本|字段|选项))"
+)
+_ELLIPTICAL_QUESTION = re.compile(
+    r"^(?:怎么|如何)(?:配|做|办|配置|设置|处理|解决|修改|使用|部署|排查)[？?]?$"
 )
 
 
@@ -32,7 +37,12 @@ def _keywords(text: str) -> list[str]:
 
 
 def _needs_rewrite(question: str, history: list[ChatHistory]) -> bool:
-    return bool(history) and bool(_FOLLOW_UP.search(question.strip()))
+    if not history:
+        return False
+    normalized = question.strip()
+    return bool(
+        _CONTEXTUAL_REFERENCE.search(normalized) or _ELLIPTICAL_QUESTION.fullmatch(normalized)
+    )
 
 
 async def _rewrite(question: str, history: list[ChatHistory]) -> tuple[str, bool, str]:

@@ -6,7 +6,7 @@ import pytest
 
 import retrieval
 from db import settings
-from schemas import QueryAnalysisRequest, RerankCandidate, RerankRequest
+from schemas import ChatHistory, QueryAnalysisRequest, RerankCandidate, RerankRequest
 
 
 def _install_memory_cache(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
@@ -21,6 +21,40 @@ def _install_memory_cache(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:
     monkeypatch.setattr(retrieval, "get_json", get_json)
     monkeypatch.setattr(retrieval, "set_json", set_json)
     return values
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "这个参数有什么限制？",
+        "它支持哪些版本？",
+        "那超时时间呢？",
+        "该配置如何修改？",
+        "怎么排查？",
+    ],
+)
+def test_contextual_follow_up_requires_rewrite(question: str) -> None:
+    history = [ChatHistory(role="user", content="上一轮在讨论 MQTT 配置")]
+
+    assert retrieval._needs_rewrite(question, history) is True
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "MQTT 如何配置？",
+        "数据库宕机该如何处理？",
+        "PostgreSQL HNSW 的 ef_search 是什么？",
+    ],
+)
+def test_self_contained_question_skips_rewrite(question: str) -> None:
+    history = [ChatHistory(role="user", content="上一轮在讨论无关内容")]
+
+    assert retrieval._needs_rewrite(question, history) is False
+
+
+def test_follow_up_without_history_skips_rewrite() -> None:
+    assert retrieval._needs_rewrite("它支持哪些版本？", []) is False
 
 
 def _install_rewrite(
