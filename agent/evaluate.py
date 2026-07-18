@@ -8,9 +8,12 @@ import json
 import math
 import re
 import statistics
+import sys
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NotRequired, TypedDict
 
 from pgvector import Vector
 
@@ -29,17 +32,89 @@ class Candidate:
     score: float = 0
 
 
+@dataclass(frozen=True)
+class ReleaseThresholds:
+    """发布评测必须达到的最低检索质量和最高延迟。"""
+
+    recall_at_20: float = 0.95
+    rerank_recall_at_5: float = 0.90
+    retrieval_p95_ms: float = 2500
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("recall_at_20", self.recall_at_20),
+            ("rerank_recall_at_5", self.rerank_recall_at_5),
+        ):
+            if not math.isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(f"{name} must be a finite value between 0 and 1")
+        if not math.isfinite(self.retrieval_p95_ms) or self.retrieval_p95_ms <= 0:
+            raise ValueError("retrieval_p95_ms must be a finite positive value")
+
+
+class EvaluationCase(TypedDict):
+    question: str
+    expected_material_ids: list[int]
+    id: NotRequired[str | int]
+
+
+class CaseFailure(TypedDict):
+    case_id: str
+    expected_material_ids: list[int]
+    raw_top_20_material_ids: list[int]
+    rerank_top_5_material_ids: list[int]
+
+
+class EvaluationResult(TypedDict):
+    version: str
+    cases: int
+    recall_at_5: float
+    recall_at_20: float
+    rerank_recall_at_5: float
+    mrr: float
+    ndcg_at_5: float
+    retrieval_p95_ms: float
+    failed_cases: list[CaseFailure]
+
+
 def _lexical_terms(text: str) -> list[str]:
     terms = [text]
     terms.extend(re.findall(r"[A-Za-z][A-Za-z0-9_.:/-]{1,}|[\u4e00-\u9fff]{2,8}", text))
     return list(dict.fromkeys(term.strip().lower() for term in terms if term.strip()))[:16]
 
 
-def _load(path: Path, allow_small: bool) -> list[dict]:
-    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
-    for row in rows:
-        if not row.get("question") or not row.get("expected_material_ids"):
-            raise ValueError("each case needs question and expected_material_ids")
+def _load(path: Path, allow_small: bool) -> list[EvaluationCase]:
+    rows: list[EvaluationCase] = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        raw = json.loads(line)
+        if not isinstance(raw, dict):
+            raise ValueError(f"case at line {line_number} must be a JSON object")
+        question = raw.get("question")
+        expected = raw.get("expected_material_ids")
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError(f"case at line {line_number} needs a non-empty question")
+        if (
+            not isinstance(expected, list)
+            or not expected
+            or any(
+                not isinstance(value, int) or isinstance(value, bool) or value <= 0
+                for value in expected
+            )
+        ):
+            raise ValueError(
+                f"case at line {line_number} needs positive integer expected_material_ids"
+            )
+        row: EvaluationCase = {
+            "question": question.strip(),
+            "expected_material_ids": expected,
+        }
+        case_id = raw.get("id")
+        if isinstance(case_id, (str, int)) and not isinstance(case_id, bool):
+            row["id"] = case_id
+        rows.append(row)
+    if not rows:
+        raise ValueError("evaluation set must contain at least one case")
     if len(rows) < 100 and not allow_small:
         raise ValueError(f"only {len(rows)} cases; at least 100 human-labelled cases are required")
     return rows
@@ -124,9 +199,12 @@ def _case_metrics(ranking: list[int], expected: set[int], k: int) -> tuple[float
     return recall, reciprocal_rank, dcg / ideal if ideal else 0
 
 
-async def evaluate(cases: list[dict], version: str) -> dict:
+async def evaluate(cases: list[EvaluationCase], version: str) -> EvaluationResult:
+    """评测指定索引版本并返回聚合指标和未完全召回的用例明细。"""
+
     raw5, raw20, rerank5, mrr, ndcg, latencies = [], [], [], [], [], []
-    for case in cases:
+    failed_cases: list[CaseFailure] = []
+    for case_number, case in enumerate(cases, 1):
         started = time.perf_counter()
         raw = _retrieve(case["question"], version)
         reranked = await _reranked(case["question"], raw)
@@ -141,6 +219,15 @@ async def evaluate(cases: list[dict], version: str) -> dict:
         rerank5.append(reranked_score[0])
         mrr.append(reranked_score[1])
         ndcg.append(reranked_score[2])
+        if score20[0] < 1 or reranked_score[0] < 1:
+            failed_cases.append(
+                {
+                    "case_id": str(case.get("id", case_number)),
+                    "expected_material_ids": sorted(expected),
+                    "raw_top_20_material_ids": raw_ranking[:20],
+                    "rerank_top_5_material_ids": rerank_ranking[:5],
+                }
+            )
     ordered = sorted(latencies)
     p95 = ordered[max(0, math.ceil(len(ordered) * 0.95) - 1)]
     return {
@@ -152,19 +239,77 @@ async def evaluate(cases: list[dict], version: str) -> dict:
         "mrr": statistics.fmean(mrr),
         "ndcg_at_5": statistics.fmean(ndcg),
         "retrieval_p95_ms": p95,
+        "failed_cases": failed_cases,
     }
 
 
-async def main() -> None:
+def release_gate_failures(
+    results: Sequence[EvaluationResult],
+    release_version: str,
+    thresholds: ReleaseThresholds,
+) -> list[str]:
+    """返回发布门禁失败原因；空列表表示指定版本可以进入灰度。"""
+
+    result = next((item for item in results if item["version"] == release_version), None)
+    if result is None:
+        return [f"release version {release_version!r} was not evaluated"]
+
+    failures: list[str] = []
+    for metric in ("recall_at_20", "rerank_recall_at_5", "retrieval_p95_ms"):
+        if not math.isfinite(result[metric]):
+            failures.append(f"{metric} is not finite")
+    if failures:
+        return failures
+    if result["recall_at_20"] < thresholds.recall_at_20:
+        failures.append(
+            f"recall_at_20={result['recall_at_20']:.4f} < {thresholds.recall_at_20:.4f}"
+        )
+    if result["rerank_recall_at_5"] < thresholds.rerank_recall_at_5:
+        failures.append(
+            "rerank_recall_at_5="
+            f"{result['rerank_recall_at_5']:.4f} < {thresholds.rerank_recall_at_5:.4f}"
+        )
+    if result["retrieval_p95_ms"] > thresholds.retrieval_p95_ms:
+        failures.append(
+            f"retrieval_p95_ms={result['retrieval_p95_ms']:.1f} > {thresholds.retrieval_p95_ms:.1f}"
+        )
+    return failures
+
+
+async def main(argv: Sequence[str] | None = None) -> int:
+    """运行离线评测；发布门禁失败时返回非零退出码。"""
+
     parser = argparse.ArgumentParser()
     parser.add_argument("cases", type=Path)
     parser.add_argument("--versions", nargs="+", default=["legacy-v1", "rag-v2"])
     parser.add_argument("--allow-small", action="store_true", help="only for local smoke tests")
-    args = parser.parse_args()
+    parser.add_argument("--release-version", default="rag-v2")
+    parser.add_argument("--min-recall-at-20", type=float, default=0.95)
+    parser.add_argument("--min-rerank-recall-at-5", type=float, default=0.90)
+    parser.add_argument("--max-retrieval-p95-ms", type=float, default=2500)
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="print metrics without failing the release gate; never use for activation",
+    )
+    args = parser.parse_args(argv)
+    try:
+        thresholds = ReleaseThresholds(
+            recall_at_20=args.min_recall_at_20,
+            rerank_recall_at_5=args.min_rerank_recall_at_5,
+            retrieval_p95_ms=args.max_retrieval_p95_ms,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     cases = _load(args.cases, args.allow_small)
     results = [await evaluate(cases, version) for version in args.versions]
-    print(json.dumps(results, ensure_ascii=False, indent=2))
+    sys.stdout.write(json.dumps(results, ensure_ascii=False, indent=2) + "\n")
+    failures = release_gate_failures(results, args.release_version, thresholds)
+    if failures and not args.report_only:
+        sys.stderr.write("release gate failed:\n- " + "\n- ".join(failures) + "\n")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

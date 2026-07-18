@@ -21,7 +21,7 @@ Backend 需要分别配置 MinIO 内部连接端点与浏览器可解析的 `MIN
 
 1. `DB_DSN=... make reindex-rag-v2` 将缺少 v2 正文块的资料重新入队；既有资料继续使用 legacy-v1。
 2. 团队按 `tests/evals/rag_cases.example.jsonl` 格式维护至少 100 条人工标注，生产前扩充到 300 条。
-3. 在 Agent 目录执行 `python evaluate.py ../tests/evals/rag_cases.jsonl`。门槛为 Recall@20 ≥ 0.95、Rerank Recall@5 ≥ 0.90、检索 P95 ≤ 2500ms。
+3. 在 Agent 目录执行 `python evaluate.py ../tests/evals/rag_cases.jsonl > rag-evaluation.json`。脚本默认对 `rag-v2` 执行发布门禁：Recall@20 ≥ 0.95、Rerank Recall@5 ≥ 0.90、检索 P95 ≤ 2500ms，任一不达标即返回非零退出码；报告中的 `failed_cases` 用于回查未完全召回的标注用例。仅探索指标时可显式使用 `--report-only`，该参数不得用于激活流程。
 4. 达标后依次执行 `DB_DSN=... RAG_ROLLOUT_PERCENTAGE=10 make activate-rag-v2`、`50` 和 `100`。脚本会验证每份资料都有 v2 body，并按 material ID 的稳定 cohort 切换；重复执行同一比例是幂等的，缩小比例也会把 cohort 外且存在 legacy 数据的资料切回。
 5. 每个灰度阶段观察约 48 小时。异常执行 `DB_DSN=... make rollback-rag-v2`；有 legacy 的资料立即切回，新上传的 v2-only 资料保持可用。
 6. v2 连续激活 14 天后，人工执行 `backend/scripts/retire_legacy_rag.sql`。每日执行 `retain_rag_runs.sql` 清理超过 90 天的运行明细。
