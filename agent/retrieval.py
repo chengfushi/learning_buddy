@@ -156,6 +156,54 @@ def _local_rerank(req: RerankRequest) -> RerankResponse:
     return RerankResponse(items=items, model="rrf-order-fallback", degraded=True)
 
 
+def _valid_cached_rerank(req: RerankRequest, response: RerankResponse) -> RerankResponse | None:
+    expected = min(req.top_n, len(req.candidates))
+    candidate_ids = {candidate.chunk_id for candidate in req.candidates}
+    item_ids = [item.chunk_id for item in response.items]
+    if (
+        response.degraded
+        or response.model != settings.rerank_model
+        or len(item_ids) != expected
+        or len(set(item_ids)) != expected
+        or not set(item_ids).issubset(candidate_ids)
+        or any(not math.isfinite(item.score) for item in response.items)
+    ):
+        return None
+    return response
+
+
+def _remote_rerank_items(req: RerankRequest, raw_items: object) -> list[RerankItem] | None:
+    expected = min(req.top_n, len(req.candidates))
+    if not isinstance(raw_items, list) or len(raw_items) < expected:
+        return None
+    seen_indexes: set[int] = set()
+    items: list[RerankItem] = []
+    for raw_item in raw_items[:expected]:
+        if not isinstance(raw_item, dict):
+            return None
+        index = raw_item.get("index")
+        score = raw_item.get("relevance_score", raw_item.get("score"))
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or index < 0
+            or index >= len(req.candidates)
+            or index in seen_indexes
+            or isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+        ):
+            return None
+        seen_indexes.add(index)
+        items.append(
+            RerankItem(
+                chunk_id=req.candidates[index].chunk_id,
+                score=float(score),
+            )
+        )
+    return items
+
+
 async def rerank(req: RerankRequest) -> RerankResponse:
     """调用 qwen3-rerank；超时或协议错误时回退确定性词项重排。"""
     if not req.candidates:
@@ -175,7 +223,9 @@ async def rerank(req: RerankRequest) -> RerankResponse:
     cached = await get_json(key)
     if isinstance(cached, dict):
         try:
-            return RerankResponse.model_validate(cached)
+            cached_response = _valid_cached_rerank(req, RerankResponse.model_validate(cached))
+            if cached_response is not None:
+                return cached_response
         except Exception:
             pass
     try:
@@ -196,16 +246,9 @@ async def rerank(req: RerankRequest) -> RerankResponse:
         response.raise_for_status()
         payload = response.json()
         raw_items = payload.get("results") or payload.get("output", {}).get("results") or []
-        items = [
-            RerankItem(
-                chunk_id=req.candidates[int(item["index"])].chunk_id,
-                score=float(item.get("relevance_score", item.get("score", 0))),
-            )
-            for item in raw_items
-            if 0 <= int(item.get("index", -1)) < len(req.candidates)
-        ][: req.top_n]
-        if not items:
-            raise ValueError("empty rerank response")
+        items = _remote_rerank_items(req, raw_items)
+        if items is None:
+            raise ValueError("invalid or incomplete rerank response")
         result = RerankResponse(items=items, model=settings.rerank_model)
         await set_json(key, result.model_dump(), 3600)
         return result
