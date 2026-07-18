@@ -1,14 +1,28 @@
 # learning_buddy 常用命令
 
-.PHONY: infra dev lint format migrate provision-parser reindex-rag-v2 activate-rag-v2 rollback-rag-v2
+COMPOSE_DEV = docker compose -f docker-compose.yml -f docker-compose.dev.yml
 
-## 仅起基础设施（db / redis / minio）
+.PHONY: infra dev dev-down dev-restart dev-rebuild lint format migrate provision-parser reindex-rag-v2 activate-rag-v2 rollback-rag-v2
+
+## 启动宿主机独立基础设施容器（不属于本项目 Compose）
 infra:
-	docker compose up -d db redis minio
+	docker start local-pg17-vector redis minio
 
-## 起全栈
+## 启动开发环境（源码热更新）
 dev:
-	docker compose up
+	$(COMPOSE_DEV) up -d
+
+## 停止开发环境
+dev-down:
+	$(COMPOSE_DEV) down
+
+## 重启开发环境（代码修改通常无需执行，热更新会自动生效）
+dev-restart:
+	$(COMPOSE_DEV) restart
+
+## Compose、Dockerfile 或依赖修改后重新构建
+dev-rebuild:
+	$(COMPOSE_DEV) up -d --build --force-recreate
 
 ## 格式化（自动修复可安全格式化的内容）
 format:

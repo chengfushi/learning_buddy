@@ -6,13 +6,14 @@ import Reader from "./pages/Reader";
 import Teams from "./pages/Teams";
 import Companion from "./pages/Companion";
 import Learning from "./pages/Learning";
+import type { MaterialNavigationTarget } from "./material-navigation";
 
 type View = "library" | "teams" | "companion" | "learning";
 
 export default function App() {
   const { user, ready, logout } = useAuth();
   const [view, setView] = useState<View>("library");
-  const [openMaterial, setOpenMaterial] = useState<number | null>(null);
+  const [openMaterial, setOpenMaterial] = useState<MaterialNavigationTarget | null>(null);
   const [companionMat, setCompanionMat] = useState<number | undefined>(undefined);
 
   if (!ready) return <div className="loading">加载中…</div>;
@@ -54,7 +55,8 @@ export default function App() {
       <div className="content">
         {openMaterial !== null ? (
           <Reader
-            materialId={openMaterial}
+            materialId={openMaterial.materialId}
+            focus={{ pageNumber: openMaterial.pageNumber, assetId: openMaterial.assetId }}
             onBack={() => setOpenMaterial(null)}
             onAsk={(id) => {
               setCompanionMat(id);
@@ -64,10 +66,12 @@ export default function App() {
           />
         ) : (
           <>
-            {view === "library" && <Library onOpenMaterial={(id) => setOpenMaterial(id)} />}
+            {view === "library" && (
+              <Library onOpenMaterial={(id) => setOpenMaterial({ materialId: id })} />
+            )}
             {view === "teams" && <Teams />}
             {view === "companion" && (
-              <Companion materialId={companionMat} onOpenMaterial={(id) => setOpenMaterial(id)} />
+              <Companion materialId={companionMat} onOpenMaterial={setOpenMaterial} />
             )}
             {view === "learning" && <Learning />}
           </>

@@ -1,11 +1,14 @@
 package handler
 
 import (
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"learning_buddy/backend/internal/model"
 	"learning_buddy/backend/internal/service"
 )
 
@@ -27,3 +30,25 @@ func TestValidateCitationsRebuildsAuthorizedFieldsAndDropsUnknownIDs(t *testing.
 }
 
 func int64Pointer(value int64) *int64 { return &value }
+
+func TestSessionMessageViewsDecodeCitationsAndTolerateCorruptHistory(t *testing.T) {
+	createdAt := time.Date(2026, 7, 18, 7, 0, 0, 0, time.UTC)
+	citations, err := json.Marshal([]service.Citation{{
+		TeamID: 1, MaterialID: 2, Chapter: "第一章", ChunkIdx: 3,
+	}})
+	require.NoError(t, err)
+
+	views := sessionMessageViews([]model.AgentMessage{
+		{ID: 10, SessionID: "session-1", Role: "assistant", Content: "回答", Citations: citations, CreatedAt: createdAt},
+		{ID: 11, SessionID: "session-1", Role: "assistant", Content: "旧回答", Citations: []byte("broken")},
+		{ID: 12, SessionID: "session-1", Role: "assistant", Content: "空引用", Citations: []byte("null")},
+	})
+
+	require.Len(t, views, 3)
+	require.Len(t, views[0].Citations, 1)
+	assert.Equal(t, int64(2), views[0].Citations[0].MaterialID)
+	assert.Equal(t, createdAt, views[0].CreatedAt)
+	assert.Empty(t, views[1].Citations)
+	assert.NotNil(t, views[2].Citations)
+	assert.Empty(t, views[2].Citations)
+}

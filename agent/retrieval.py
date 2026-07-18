@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 
 import httpx
@@ -10,7 +11,7 @@ import httpx
 from cache import cache_key, get_json, set_json
 from db import settings
 from embed import embed_text
-from pipeline import redact_for_cloud
+from pipeline import estimate_tokens, redact_for_cloud
 from schemas import (
     ChatHistory,
     QueryAnalysisRequest,
@@ -20,8 +21,13 @@ from schemas import (
     RerankResponse,
 )
 
-_FOLLOW_UP = re.compile(
-    r"^(它|他|她|这个|那个|上述|前面|其中|该|那)(的|是|如何|怎么)|^(怎么|如何)(配|做|设置|处理)[？?]?$"
+_CONTEXTUAL_REFERENCE = re.compile(
+    r"^(?:那|那么|然后|它|他|她|其|这个|那个|这些|那些|上述|上面|前面|其中|"
+    r"(?:该|此)(?:参数|配置|功能|服务|接口|模块|组件|系统|方案|文档|命令|错误|问题|"
+    r"规则|步骤|版本|字段|选项))"
+)
+_ELLIPTICAL_QUESTION = re.compile(
+    r"^(?:怎么|如何)(?:配|做|办|配置|设置|处理|解决|修改|使用|部署|排查)[？?]?$"
 )
 
 
@@ -31,7 +37,12 @@ def _keywords(text: str) -> list[str]:
 
 
 def _needs_rewrite(question: str, history: list[ChatHistory]) -> bool:
-    return bool(history) and bool(_FOLLOW_UP.search(question.strip()))
+    if not history:
+        return False
+    normalized = question.strip()
+    return bool(
+        _CONTEXTUAL_REFERENCE.search(normalized) or _ELLIPTICAL_QUESTION.fullmatch(normalized)
+    )
 
 
 async def _rewrite(question: str, history: list[ChatHistory]) -> tuple[str, bool, str]:
@@ -66,6 +77,50 @@ async def _rewrite(question: str, history: list[ChatHistory]) -> tuple[str, bool
         return question, False, "local-fallback"
 
 
+def _valid_embedding(value: object) -> list[float] | None:
+    """拒绝维度错误、布尔值及非有限数，避免污染缓存和向量查询。"""
+    if not isinstance(value, list) or len(value) != settings.embedding_dim:
+        return None
+    embedding: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+        number = float(item)
+        if not math.isfinite(number):
+            return None
+        embedding.append(number)
+    return embedding
+
+
+async def _query_embedding(retrieval_query: str) -> list[float]:
+    """独立缓存有效向量；临时故障返回空向量但不写入缓存。"""
+    cloud_query = redact_for_cloud(retrieval_query)
+    key = cache_key(
+        "embedding",
+        {
+            "provider": settings.embedding_provider,
+            "model": settings.embedding_model,
+            "dimension": settings.embedding_dim,
+            "query": cloud_query,
+        },
+    )
+    cached = _valid_embedding(await get_json(key))
+    if cached is not None:
+        return cached
+    try:
+        raw_embedding = await asyncio.wait_for(
+            asyncio.to_thread(embed_text, cloud_query, settings.retriever_timeout_s),
+            timeout=max(0.001, settings.retriever_timeout_s),
+        )
+    except Exception:
+        return []
+    embedding = _valid_embedding(raw_embedding)
+    if embedding is None:
+        return []
+    await set_json(key, embedding, 3600)
+    return embedding
+
+
 async def analyze_query(req: QueryAnalysisRequest) -> QueryAnalysisResponse:
     """分析查询并返回改写、关键词和向量；缓存不包含任何权限结果。"""
     history_payload = [
@@ -75,7 +130,6 @@ async def analyze_query(req: QueryAnalysisRequest) -> QueryAnalysisResponse:
         "analysis",
         {
             "model": settings.llm_model,
-            "embedding": settings.embedding_model,
             "q": req.question,
             "h": history_payload,
         },
@@ -83,28 +137,24 @@ async def analyze_query(req: QueryAnalysisRequest) -> QueryAnalysisResponse:
     cached = await get_json(key)
     if isinstance(cached, dict):
         try:
-            return QueryAnalysisResponse.model_validate(cached)
+            analysis = QueryAnalysisResponse.model_validate(cached)
         except Exception:
-            pass
-    retrieval_query, applied, model = await _rewrite(req.question, req.history)
-    try:
-        embedding = await asyncio.wait_for(
-            asyncio.to_thread(
-                embed_text, redact_for_cloud(retrieval_query), settings.retriever_timeout_s
-            ),
-            timeout=max(0.001, settings.retriever_timeout_s),
+            analysis = None
+    else:
+        analysis = None
+    if analysis is None:
+        retrieval_query, applied, model = await _rewrite(req.question, req.history)
+        analysis = QueryAnalysisResponse(
+            retrieval_query=retrieval_query,
+            keywords=_keywords(retrieval_query),
+            rewrite_applied=applied,
+            model=model,
         )
-    except Exception:
-        embedding = []
-    result = QueryAnalysisResponse(
-        retrieval_query=retrieval_query,
-        keywords=_keywords(retrieval_query),
-        embedding=embedding,
-        rewrite_applied=applied,
-        model=model,
+        await set_json(key, analysis.model_dump(exclude={"embedding"}), 1800)
+    embedding = await _query_embedding(analysis.retrieval_query)
+    return analysis.model_copy(
+        update={"embedding": embedding},
     )
-    await set_json(key, result.model_dump(), 1800)
-    return result
 
 
 def _local_rerank(req: RerankRequest) -> RerankResponse:
@@ -114,6 +164,70 @@ def _local_rerank(req: RerankRequest) -> RerankResponse:
         for index, candidate in enumerate(req.candidates[: req.top_n])
     ]
     return RerankResponse(items=items, model="rrf-order-fallback", degraded=True)
+
+
+def _truncate_rerank_document(text: str) -> str:
+    """按模型 Token 上限保守截断，避免一个超长旧块拖垮整次重排。"""
+    limit = max(1, settings.rerank_max_document_tokens)
+    max_chars = limit * 4
+    if len(text) <= max_chars and estimate_tokens(text) <= limit:
+        return text
+    low, high = 0, min(len(text), max_chars)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if estimate_tokens(text[:middle]) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low]
+
+
+def _valid_cached_rerank(req: RerankRequest, response: RerankResponse) -> RerankResponse | None:
+    expected = min(req.top_n, len(req.candidates))
+    candidate_ids = {candidate.chunk_id for candidate in req.candidates}
+    item_ids = [item.chunk_id for item in response.items]
+    if (
+        response.degraded
+        or response.model != settings.rerank_model
+        or len(item_ids) != expected
+        or len(set(item_ids)) != expected
+        or not set(item_ids).issubset(candidate_ids)
+        or any(not math.isfinite(item.score) for item in response.items)
+    ):
+        return None
+    return response
+
+
+def _remote_rerank_items(req: RerankRequest, raw_items: object) -> list[RerankItem] | None:
+    expected = min(req.top_n, len(req.candidates))
+    if not isinstance(raw_items, list) or len(raw_items) < expected:
+        return None
+    seen_indexes: set[int] = set()
+    items: list[RerankItem] = []
+    for raw_item in raw_items[:expected]:
+        if not isinstance(raw_item, dict):
+            return None
+        index = raw_item.get("index")
+        score = raw_item.get("relevance_score", raw_item.get("score"))
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or index < 0
+            or index >= len(req.candidates)
+            or index in seen_indexes
+            or isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(float(score))
+        ):
+            return None
+        seen_indexes.add(index)
+        items.append(
+            RerankItem(
+                chunk_id=req.candidates[index].chunk_id,
+                score=float(score),
+            )
+        )
+    return items
 
 
 async def rerank(req: RerankRequest) -> RerankResponse:
@@ -135,7 +249,9 @@ async def rerank(req: RerankRequest) -> RerankResponse:
     cached = await get_json(key)
     if isinstance(cached, dict):
         try:
-            return RerankResponse.model_validate(cached)
+            cached_response = _valid_cached_rerank(req, RerankResponse.model_validate(cached))
+            if cached_response is not None:
+                return cached_response
         except Exception:
             pass
     try:
@@ -147,7 +263,8 @@ async def rerank(req: RerankRequest) -> RerankResponse:
                     "model": settings.rerank_model,
                     "query": redact_for_cloud(req.query),
                     "documents": [
-                        redact_for_cloud(item.content)[:16000] for item in req.candidates
+                        _truncate_rerank_document(redact_for_cloud(item.content))
+                        for item in req.candidates
                     ],
                     "top_n": req.top_n,
                     "instruct": "Given a technical question, retrieve passages that directly answer it.",
@@ -156,16 +273,9 @@ async def rerank(req: RerankRequest) -> RerankResponse:
         response.raise_for_status()
         payload = response.json()
         raw_items = payload.get("results") or payload.get("output", {}).get("results") or []
-        items = [
-            RerankItem(
-                chunk_id=req.candidates[int(item["index"])].chunk_id,
-                score=float(item.get("relevance_score", item.get("score", 0))),
-            )
-            for item in raw_items
-            if 0 <= int(item.get("index", -1)) < len(req.candidates)
-        ][: req.top_n]
-        if not items:
-            raise ValueError("empty rerank response")
+        items = _remote_rerank_items(req, raw_items)
+        if items is None:
+            raise ValueError("invalid or incomplete rerank response")
         result = RerankResponse(items=items, model=settings.rerank_model)
         await set_json(key, result.model_dump(), 3600)
         return result

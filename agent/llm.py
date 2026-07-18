@@ -14,6 +14,8 @@ import httpx
 from db import settings
 from pipeline import redact_for_cloud
 
+NO_EVIDENCE_RESPONSE = "当前知识库未找到依据"
+
 
 class ChunkView:
     def __init__(
@@ -67,10 +69,7 @@ class MockLLM(LLM):
 
     def chat(self, question: str, chunks: list[ChunkView], history=None) -> str:
         if not chunks:
-            return (
-                f"关于「{question}」，当前可见知识库中暂未找到相关资料。"
-                "你可以换一种问法，或请老师将相关材料设为共享后重试。"
-            )
+            return NO_EVIDENCE_RESPONSE
         lines = [f"关于「{question}」，根据团队知识库中的相关资料，整理如下：", ""]
         for i, c in enumerate(chunks[:4], 1):
             src = f"（来源：{c.chapter or '资料'}）" if c.chapter else ""

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import struct
+import zlib
 
 import fitz
 import pytest
@@ -9,6 +11,17 @@ from docx import Document
 import pipeline
 from db import settings
 from pipeline import ExtractedAsset
+
+
+def _png_pixel(red: int, green: int, blue: int) -> bytes:
+    def chunk(name: bytes, payload: bytes) -> bytes:
+        checksum = zlib.crc32(name + payload) & 0xFFFFFFFF
+        return struct.pack(">I", len(payload)) + name + payload + struct.pack(">I", checksum)
+
+    signature = b"\x89PNG\r\n\x1a\n"
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    pixels = zlib.compress(bytes([0, red, green, blue]))
+    return signature + chunk(b"IHDR", header) + chunk(b"IDAT", pixels) + chunk(b"IEND", b"")
 
 
 def test_cleaning_and_cloud_redaction_are_separate() -> None:
@@ -72,6 +85,38 @@ def test_docx_preserves_paragraph_and_table_order() -> None:
     document.save(output)
     markdown, _assets = pipeline._extract_docx(output.getvalue())
     assert markdown.index("表格之前") < markdown.index("| 参数 | 值 |") < markdown.index("表格之后")
+
+
+def test_docx_images_keep_document_order_and_heading_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    red, blue = _png_pixel(255, 0, 0), _png_pixel(0, 0, 255)
+    document = Document()
+    document.add_heading("安装", level=1)
+    document.add_paragraph("安装步骤").add_run().add_picture(io.BytesIO(red))
+    document.add_heading("配置", level=1)
+    table = document.add_table(rows=1, cols=1)
+    table.cell(0, 0).paragraphs[0].add_run().add_picture(io.BytesIO(blue))
+    document.add_heading("排错", level=1)
+    document.add_picture(io.BytesIO(red))
+    output = io.BytesIO()
+    document.save(output)
+
+    markdown, assets = pipeline._extract_docx(output.getvalue())
+
+    assert "# 安装" in markdown and "# 配置" in markdown and "# 排错" in markdown
+    assert [asset.data for asset in assets] == [red, blue, red]
+    assert [asset.heading_path for asset in assets] == ["安装", "配置", "排错"]
+
+    monkeypatch.setattr(pipeline, "extract_document", lambda *_args: (markdown, assets))
+    monkeypatch.setattr(pipeline, "write_derived", lambda *_args: None)
+    monkeypatch.setattr(pipeline, "analyze_image", lambda _asset: ("OCR", "说明"))
+    result = pipeline.process_document(1, 1, "", "docx", "source")
+    image_chunks = [chunk for chunk in result.chunks if chunk.kind == "image"]
+
+    assert len(result.assets) == 2
+    assert result.assets[0].heading_path == "安装 | 排错"
+    assert [chunk.heading_path for chunk in image_chunks] == ["安装 | 排错", "配置"]
 
 
 def test_pdf_keeps_page_numbers() -> None:

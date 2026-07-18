@@ -276,6 +276,42 @@ textarea {
   flex-direction: column;
   height: calc(100vh - 150px);
 }
+.chat-history-bar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.chat-history-bar details {
+  flex: 1;
+}
+.chat-history-bar summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+}
+.session-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 8px;
+}
+.session-list button {
+  max-width: 240px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  background: #fff;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-list button.session-on {
+  border-color: var(--brand);
+  background: #eef1ff;
+  color: var(--brand);
+}
 .messages {
   flex: 1;
   overflow-y: auto;
@@ -337,6 +373,36 @@ textarea {
 .feedback-controls button.selected {
   background: #e8edff;
 }
+.rag-degraded {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-left: 3px solid #b7791f;
+  background: #fff8e6;
+  color: #7a4b00;
+  font-size: 12px;
+}
+.rag-timings {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.rag-timings summary {
+  cursor: pointer;
+}
+.rag-timings dl {
+  margin: 4px 0 0;
+}
+.rag-timings dl div {
+  display: flex;
+  gap: 8px;
+}
+.rag-timings dt {
+  min-width: 72px;
+}
+.rag-timings dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
 .upload-zone {
   display: block;
   padding: 18px;
@@ -383,6 +449,12 @@ textarea {
   color: var(--muted);
   font-size: 12px;
   margin-top: 4px;
+}
+.citation-focus {
+  border-radius: 8px;
+  outline: 3px solid var(--brand);
+  outline-offset: 4px;
+  scroll-margin-block: 24px;
 }
 .composer {
   display: flex;

@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     rerank_api_key: str = ""
     rerank_base_url: str = ""
     rerank_model: str = "qwen3-rerank"
+    rerank_max_document_tokens: int = 4000
     vision_api_key: str = ""
     vision_base_url: str = ""
     vision_model: str = "qwen-vl-ocr"

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { api, type Material, type MaterialProcessing, type Team } from "../api";
 
 export default function Library({ onOpenMaterial }: { onOpenMaterial: (id: number) => void }) {
@@ -17,22 +17,41 @@ export default function Library({ onOpenMaterial }: { onOpenMaterial: (id: numbe
   const [dragging, setDragging] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const teamIdRef = useRef<number | null>(teamId);
+  const teamsRequestRef = useRef(0);
+  const materialsRequestRef = useRef(0);
+  const processingRequestRef = useRef(0);
+  const createRequestRef = useRef(0);
+  const retryRequestRef = useRef(0);
+  const reloadTimerRef = useRef<number | undefined>(undefined);
 
   const loadTeams = () => {
+    const teamsRequest = ++teamsRequestRef.current;
     setLoadingTeams(true);
     setErr("");
     api
       .listTeams()
       .then((r) => {
+        if (teamsRequest !== teamsRequestRef.current) return;
         setTeams(r.teams);
-        if (r.teams.length && teamId === null) setTeamId(r.teams[0].ID);
+        if (r.teams.length && teamIdRef.current === null) setTeamId(r.teams[0].ID);
       })
-      .catch((e) => setErr(e instanceof Error ? e.message : "加载失败"))
-      .finally(() => setLoadingTeams(false));
+      .catch((e) => {
+        if (teamsRequest === teamsRequestRef.current) {
+          setErr(e instanceof Error ? e.message : "加载失败");
+        }
+      })
+      .finally(() => {
+        if (teamsRequest === teamsRequestRef.current) setLoadingTeams(false);
+      });
   };
 
   const loadMaterials = () => {
-    if (teamId === null) {
+    const targetTeamId = teamId;
+    const materialsRequest = ++materialsRequestRef.current;
+    const isCurrentRequest = () =>
+      materialsRequest === materialsRequestRef.current && targetTeamId === teamIdRef.current;
+    if (targetTeamId === null) {
       setMaterials([]);
       setCanWrite(false);
       setLoadingMaterials(false);
@@ -43,34 +62,82 @@ export default function Library({ onOpenMaterial }: { onOpenMaterial: (id: numbe
     setCanWrite(false);
     setErr("");
     api
-      .listTeamMaterials(teamId)
+      .listTeamMaterials(targetTeamId)
       .then((r) => {
+        if (!isCurrentRequest()) return;
         setMaterials(r.materials);
         setCanWrite(r.can_write);
       })
-      .catch((e) => setErr(e instanceof Error ? e.message : "加载失败"))
-      .finally(() => setLoadingMaterials(false));
+      .catch((e) => {
+        if (isCurrentRequest()) setErr(e instanceof Error ? e.message : "加载失败");
+      })
+      .finally(() => {
+        if (isCurrentRequest()) setLoadingMaterials(false);
+      });
   };
 
   useEffect(() => {
     loadTeams();
+    return () => {
+      teamsRequestRef.current += 1;
+    };
   }, []);
+
+  useLayoutEffect(() => {
+    teamIdRef.current = teamId;
+    materialsRequestRef.current += 1;
+    processingRequestRef.current += 1;
+    createRequestRef.current += 1;
+    retryRequestRef.current += 1;
+    if (reloadTimerRef.current !== undefined) {
+      window.clearTimeout(reloadTimerRef.current);
+      reloadTimerRef.current = undefined;
+    }
+    setMaterials([]);
+    setCanWrite(false);
+    setLoadingMaterials(teamId !== null);
+    setProcessing({});
+    setErr("");
+    setShowForm(false);
+    setTitle("");
+    setContent("");
+    setFile(null);
+    setDragging(false);
+    setSaving(false);
+    setRetryingId(null);
+    return () => {
+      materialsRequestRef.current += 1;
+      processingRequestRef.current += 1;
+      createRequestRef.current += 1;
+      retryRequestRef.current += 1;
+      if (reloadTimerRef.current !== undefined) {
+        window.clearTimeout(reloadTimerRef.current);
+        reloadTimerRef.current = undefined;
+      }
+    };
+  }, [teamId]);
+
   useEffect(() => {
     loadMaterials();
   }, [teamId]);
   useEffect(() => {
+    const targetTeamId = teamId;
     const active = materials.filter((material) =>
       ["pending", "parsing"].includes(material.ParseStatus),
     );
-    if (active.length === 0) return;
-    const refresh = () =>
-      Promise.all(
+    if (targetTeamId === null || active.length === 0) return;
+    const refresh = () => {
+      const processingRequest = ++processingRequestRef.current;
+      const isCurrentRequest = () =>
+        processingRequest === processingRequestRef.current && targetTeamId === teamIdRef.current;
+      return Promise.all(
         active.map(async (material) => ({
           id: material.ID,
           run: (await api.getMaterialProcessing(material.ID)).processing,
         })),
       )
         .then((results) => {
+          if (!isCurrentRequest()) return;
           setProcessing((current) => {
             const next = { ...current };
             for (const result of results) {
@@ -79,51 +146,77 @@ export default function Library({ onOpenMaterial }: { onOpenMaterial: (id: numbe
             return next;
           });
           if (results.some((result) => ["done", "failed"].includes(result.run?.Status ?? ""))) {
-            window.setTimeout(loadMaterials, 300);
+            if (reloadTimerRef.current !== undefined) {
+              window.clearTimeout(reloadTimerRef.current);
+            }
+            reloadTimerRef.current = window.setTimeout(() => {
+              reloadTimerRef.current = undefined;
+              if (targetTeamId === teamIdRef.current) loadMaterials();
+            }, 300);
           }
         })
         .catch(() => undefined);
+    };
     void refresh();
     const timer = window.setInterval(refresh, 2000);
-    return () => window.clearInterval(timer);
-  }, [materials]);
+    return () => {
+      window.clearInterval(timer);
+      processingRequestRef.current += 1;
+      if (reloadTimerRef.current !== undefined) {
+        window.clearTimeout(reloadTimerRef.current);
+        reloadTimerRef.current = undefined;
+      }
+    };
+  }, [materials, teamId]);
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (saving) return;
     setErr("");
-    if (teamId === null) return;
+    const targetTeamId = teamId;
+    if (targetTeamId === null) return;
+    const createRequest = ++createRequestRef.current;
+    const isCurrentRequest = () =>
+      createRequest === createRequestRef.current && targetTeamId === teamIdRef.current;
     setSaving(true);
     try {
       if (file) {
-        await api.uploadMaterial({ team_id: teamId, title: title || file.name, file });
+        await api.uploadMaterial({ team_id: targetTeamId, title: title || file.name, file });
       } else {
-        await api.createMaterial({ team_id: teamId, title, content, file_type: "txt" });
+        await api.createMaterial({ team_id: targetTeamId, title, content, file_type: "txt" });
       }
+      if (!isCurrentRequest()) return;
       setTitle("");
       setContent("");
       setFile(null);
       setShowForm(false);
       loadMaterials();
     } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : "创建失败");
+      if (isCurrentRequest()) setErr(ex instanceof Error ? ex.message : "创建失败");
     } finally {
-      setSaving(false);
+      if (isCurrentRequest()) setSaving(false);
     }
   };
 
   const retryParse = async (e: React.MouseEvent, materialId: number) => {
     e.stopPropagation();
+    if (retryingId !== null) return;
+    const targetTeamId = teamId;
+    const retryRequest = ++retryRequestRef.current;
+    const isCurrentRequest = () =>
+      retryRequest === retryRequestRef.current && targetTeamId === teamIdRef.current;
     setErr("");
     setRetryingId(materialId);
     try {
       const result = await api.retryMaterialParse(materialId);
+      if (!isCurrentRequest()) return;
       setMaterials((current) =>
         current.map((material) => (material.ID === materialId ? result.material : material)),
       );
     } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : "重试失败");
+      if (isCurrentRequest()) setErr(ex instanceof Error ? ex.message : "重试失败");
     } finally {
-      setRetryingId(null);
+      if (isCurrentRequest()) setRetryingId(null);
     }
   };
 
@@ -224,7 +317,7 @@ export default function Library({ onOpenMaterial }: { onOpenMaterial: (id: numbe
                       <button
                         className="ghost"
                         type="button"
-                        disabled={retryingId === m.ID}
+                        disabled={retryingId !== null}
                         onClick={(e) => retryParse(e, m.ID)}
                       >
                         {retryingId === m.ID ? "重试中…" : "重试解析"}

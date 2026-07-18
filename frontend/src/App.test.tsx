@@ -28,16 +28,18 @@ vi.mock("./pages/Library", () => ({
 vi.mock("./pages/Reader", () => ({
   default: function MockReader({
     materialId,
+    focus,
     onBack,
     onAsk,
   }: {
     materialId: number;
+    focus?: { pageNumber?: number; assetId?: number };
     onBack: () => void;
     onAsk: (id: number) => void;
   }) {
     return (
       <div data-testid="reader-view">
-        reader-{materialId}
+        reader-{materialId}-page-{focus?.pageNumber ?? "none"}-asset-{focus?.assetId ?? "none"}
         <button type="button" onClick={onBack}>
           back
         </button>
@@ -54,8 +56,28 @@ vi.mock("./pages/Teams", () => ({
   },
 }));
 vi.mock("./pages/Companion", () => ({
-  default: function MockCompanion({ materialId }: { materialId?: number }) {
-    return <div data-testid="companion-view">companion-{materialId ?? "none"}</div>;
+  default: function MockCompanion({
+    materialId,
+    onOpenMaterial,
+  }: {
+    materialId?: number;
+    onOpenMaterial?: (target: {
+      materialId: number;
+      pageNumber?: number;
+      assetId?: number;
+    }) => void;
+  }) {
+    return (
+      <div data-testid="companion-view">
+        companion-{materialId ?? "none"}
+        <button
+          type="button"
+          onClick={() => onOpenMaterial?.({ materialId: 99, pageNumber: 4, assetId: 8 })}
+        >
+          open citation
+        </button>
+      </div>
+    );
   },
 }));
 vi.mock("./pages/Learning", () => ({
@@ -125,7 +147,7 @@ describe("App", () => {
     expect(screen.getByRole("button", { name: "团队" }).className).toBe("nav-on");
 
     fireEvent.click(screen.getByRole("button", { name: "AI 学伴" }));
-    expect(screen.getByTestId("companion-view").textContent).toBe("companion-none");
+    expect(screen.getByTestId("companion-view").textContent).toContain("companion-none");
 
     fireEvent.click(screen.getByRole("button", { name: "学习中心" }));
     expect(screen.getByTestId("learning-view")).not.toBeNull();
@@ -150,8 +172,17 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("button", { name: "open material" }));
     fireEvent.click(screen.getByRole("button", { name: "ask" }));
 
-    expect(screen.getByTestId("companion-view").textContent).toBe("companion-42");
+    expect(screen.getByTestId("companion-view").textContent).toContain("companion-42");
     expect(screen.queryByTestId("reader-view")).toBeNull();
     expect(screen.getByRole("button", { name: "AI 学伴" }).className).toBe("nav-on");
+  });
+
+  it("opens a citation at its page and image location", () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: "AI 学伴" }));
+    fireEvent.click(screen.getByRole("button", { name: "open citation" }));
+
+    expect(screen.getByTestId("reader-view").textContent).toContain("reader-99-page-4-asset-8");
   });
 });

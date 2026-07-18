@@ -15,7 +15,7 @@ from psycopg2.extras import Json
 
 from db import get_conn, settings
 from embed import embed_text
-from llm import ChunkView, MockLLM, get_llm
+from llm import NO_EVIDENCE_RESPONSE, ChunkView, MockLLM, get_llm
 from pipeline import process_document, redact_for_cloud
 from schemas import PlanResult, QuizResult
 
@@ -275,8 +275,11 @@ def parse(
 
 
 def run_chat(question: str, chunks: list[ChunkView], history=None) -> tuple[str, list[dict]]:
-    answer = get_llm().chat(question, chunks, history)
-    return answer, _citations(chunks)
+    evidence = _evidence_chunks(chunks)
+    if not evidence:
+        return NO_EVIDENCE_RESPONSE, []
+    answer = get_llm().chat(question, evidence, history)
+    return answer, _citations(evidence)
 
 
 async def run_chat_resilient(
@@ -286,11 +289,15 @@ async def run_chat_resilient(
     trace_id: str = "",
 ) -> tuple[str, list[dict]]:
     """按 Tutor 独立预算生成；检索超时降级已由 Backend 在权限过滤后处理。"""
+    evidence = _evidence_chunks(chunks)
+    if not evidence:
+        logger.info("tutor refused without evidence", extra={"trace_id": trace_id})
+        return NO_EVIDENCE_RESPONSE, []
     llm = get_llm()
     tutor_started = time.monotonic()
     try:
         answer = await asyncio.wait_for(
-            asyncio.to_thread(llm.chat, question, chunks, history),
+            asyncio.to_thread(llm.chat, question, evidence, history),
             timeout=max(0.001, settings.tutor_timeout_s),
         )
         logger.info(
@@ -309,8 +316,13 @@ async def run_chat_resilient(
                 "error_type": type(exc).__name__,
             },
         )
-        answer = MockLLM().chat(question, chunks, history)
-    return answer, _citations(chunks)
+        answer = MockLLM().chat(question, evidence, history)
+    return answer, _citations(evidence)
+
+
+def _evidence_chunks(chunks: list[ChunkView]) -> list[ChunkView]:
+    """空白片段不构成可引用证据，也不能触发生成模型。"""
+    return [chunk for chunk in chunks if chunk.content.strip()]
 
 
 def _citations(chunks: list[ChunkView]) -> list[dict]:

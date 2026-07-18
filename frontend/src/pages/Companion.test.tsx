@@ -3,7 +3,14 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, type Exercise, type StudyPlan } from "../api";
+import {
+  api,
+  type AgentMessage,
+  type AgentSession,
+  type Citation,
+  type Exercise,
+  type StudyPlan,
+} from "../api";
 import Companion from "./Companion";
 
 const plan: StudyPlan = {
@@ -46,6 +53,64 @@ const exercises: Exercise[] = [
   },
 ];
 
+const sessions: AgentSession[] = [
+  {
+    ID: "material-31-session",
+    UserID: 7,
+    MaterialID: 31,
+    Title: "牛顿定律会话",
+    CreatedAt: "2026-07-18T08:00:00Z",
+  },
+  {
+    ID: "material-32-session",
+    UserID: 7,
+    MaterialID: 32,
+    Title: "其他资料会话",
+    CreatedAt: "2026-07-18T07:00:00Z",
+  },
+  {
+    ID: "global-session",
+    UserID: 7,
+    MaterialID: null,
+    Title: "全局会话",
+    CreatedAt: "2026-07-18T06:00:00Z",
+  },
+];
+
+const restoredHistory: AgentMessage[] = [
+  {
+    ID: 80,
+    Role: "user",
+    Content: "什么是惯性？",
+    Citations: [],
+    CreatedAt: "2026-07-18T08:00:00Z",
+  },
+  {
+    ID: 81,
+    Role: "assistant",
+    Content: "历史回答",
+    Citations: [
+      {
+        team_id: 1,
+        material_id: 31,
+        chapter: "第一章",
+        chunk_idx: 0,
+        title: "牛顿定律",
+        page_number: 3,
+        asset_id: 91,
+      },
+    ],
+    CreatedAt: "2026-07-18T08:00:01Z",
+  },
+  {
+    ID: 82,
+    Role: "system",
+    Content: "内部状态",
+    Citations: [],
+    CreatedAt: "2026-07-18T08:00:02Z",
+  },
+];
+
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -83,6 +148,11 @@ describe("Companion", () => {
   beforeEach(() => {
     vi.stubGlobal("localStorage", createMemoryStorage());
     vi.spyOn(api, "chatStream").mockResolvedValue(undefined);
+    vi.spyOn(api, "listSessions").mockResolvedValue({ sessions: [] });
+    vi.spyOn(api, "getSession").mockResolvedValue({ session_id: "empty-session", messages: [] });
+    vi.spyOn(api, "submitFeedback").mockResolvedValue({
+      feedback: { ID: 1, Rating: "up", Reason: null },
+    });
     vi.spyOn(api, "createPlan").mockResolvedValue({ plan });
     vi.spyOn(api, "createQuiz").mockResolvedValue({ exercises });
     vi.spyOn(api, "answerQuiz").mockResolvedValue({
@@ -111,9 +181,20 @@ describe("Companion", () => {
   });
 
   it("isolates persisted sessions between global and material-scoped chats", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue({ sessions });
+    vi.mocked(api.getSession).mockImplementation(async (sessionId) => ({
+      session_id: sessionId,
+      messages: [],
+    }));
     globalThis.localStorage.setItem("lb_chat_session:global", "global-session");
     globalThis.localStorage.setItem("lb_chat_session:material:31", "material-31-session");
     const { rerender } = render(<Companion materialId={31} />);
+
+    await waitFor(() =>
+      expect((screen.getByPlaceholderText("针对当前资料提问…") as HTMLInputElement).disabled).toBe(
+        false,
+      ),
+    );
 
     fireEvent.change(screen.getByPlaceholderText("针对当前资料提问…"), {
       target: { value: "资料问题" },
@@ -131,6 +212,9 @@ describe("Companion", () => {
     );
 
     rerender(<Companion />);
+    await waitFor(() =>
+      expect((screen.getByPlaceholderText("向学伴提问…") as HTMLInputElement).disabled).toBe(false),
+    );
     fireEvent.change(screen.getByPlaceholderText("向学伴提问…"), {
       target: { value: "全局问题" },
     });
@@ -143,14 +227,162 @@ describe("Companion", () => {
     );
   });
 
+  it("keeps the composer usable while the session list is still loading", async () => {
+    vi.mocked(api.listSessions).mockReturnValue(new Promise(() => undefined));
+    globalThis.localStorage.setItem("lb_chat_session:material:31", "material-31-session");
+    render(<Companion materialId={31} />);
+
+    const input = screen.getByPlaceholderText("针对当前资料提问…") as HTMLInputElement;
+    expect(input.disabled).toBe(false);
+    fireEvent.change(input, { target: { value: "继续追问" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() =>
+      expect(api.chatStream).toHaveBeenCalledWith(
+        { question: "继续追问", material_id: 31, session_id: "material-31-session" },
+        expect.any(Object),
+      ),
+    );
+    expect(api.getSession).not.toHaveBeenCalled();
+  });
+
+  it("restores only the persisted material-scoped history and can start a clean conversation", async () => {
+    const onOpenMaterial = vi.fn();
+    vi.mocked(api.listSessions).mockResolvedValue({ sessions });
+    vi.mocked(api.getSession).mockResolvedValue({
+      session_id: "material-31-session",
+      messages: restoredHistory,
+    });
+    globalThis.localStorage.setItem("lb_chat_session:material:31", "material-31-session");
+
+    render(<Companion materialId={31} onOpenMaterial={onOpenMaterial} />);
+
+    expect(await screen.findByText("历史回答")).not.toBeNull();
+    expect(api.getSession).toHaveBeenCalledWith("material-31-session");
+    expect(screen.getByText("历史会话（1）")).not.toBeNull();
+    expect(screen.queryByText("其他资料会话")).toBeNull();
+    expect(screen.queryByText("全局会话")).toBeNull();
+    expect(screen.queryByText("内部状态")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "牛顿定律·第 3 页" }));
+    expect(onOpenMaterial).toHaveBeenCalledWith({ materialId: 31, pageNumber: 3, assetId: 91 });
+    expect(screen.getByRole("button", { name: "点赞" })).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "新对话" }));
+    expect(screen.queryByText("历史回答")).toBeNull();
+    expect(globalThis.localStorage.getItem("lb_chat_session:material:31")).toBeNull();
+
+    fireEvent.change(screen.getByPlaceholderText("针对当前资料提问…"), {
+      target: { value: "新的问题" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() =>
+      expect(api.chatStream).toHaveBeenCalledWith(
+        { question: "新的问题", material_id: 31, session_id: undefined },
+        expect.any(Object),
+      ),
+    );
+  });
+
+  it("serializes feedback, honors prompt cancellation, and counts Unicode characters", async () => {
+    const firstFeedback = deferred<{
+      feedback: { ID: number; Rating: string; Reason: string | null };
+    }>();
+    vi.mocked(api.listSessions).mockResolvedValue({ sessions });
+    vi.mocked(api.getSession).mockResolvedValue({
+      session_id: "material-31-session",
+      messages: restoredHistory,
+    });
+    vi.mocked(api.submitFeedback)
+      .mockReturnValueOnce(firstFeedback.promise)
+      .mockResolvedValue({ feedback: { ID: 1, Rating: "down", Reason: null } });
+    const prompt = vi
+      .spyOn(window, "prompt")
+      .mockReturnValueOnce(null)
+      .mockReturnValueOnce("😀".repeat(500))
+      .mockReturnValueOnce("😀".repeat(501));
+    globalThis.localStorage.setItem("lb_chat_session:material:31", "material-31-session");
+    render(<Companion materialId={31} />);
+    await screen.findByText("历史回答");
+
+    fireEvent.click(screen.getByRole("button", { name: "点踩" }));
+    expect(prompt).toHaveBeenCalledOnce();
+    expect(api.submitFeedback).not.toHaveBeenCalled();
+
+    const up = screen.getByRole("button", { name: "点赞" }) as HTMLButtonElement;
+    fireEvent.click(up);
+    fireEvent.click(up);
+    expect(api.submitFeedback).toHaveBeenCalledOnce();
+    expect(up.disabled).toBe(true);
+    await act(async () =>
+      firstFeedback.resolve({ feedback: { ID: 1, Rating: "up", Reason: null } }),
+    );
+    await waitFor(() => expect(up.className).toBe("selected"));
+
+    const down = screen.getByRole("button", { name: "点踩" }) as HTMLButtonElement;
+    fireEvent.click(down);
+    await waitFor(() =>
+      expect(api.submitFeedback).toHaveBeenLastCalledWith(81, "down", "😀".repeat(500)),
+    );
+    await waitFor(() => expect(down.disabled).toBe(false));
+    fireEvent.click(down);
+    expect(await screen.findByText("反馈原因不能超过 500 字")).not.toBeNull();
+    expect(api.submitFeedback).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-enables feedback after a failed request and only marks a successful retry", async () => {
+    vi.mocked(api.listSessions).mockResolvedValue({ sessions });
+    vi.mocked(api.getSession).mockResolvedValue({
+      session_id: "material-31-session",
+      messages: restoredHistory,
+    });
+    vi.mocked(api.submitFeedback)
+      .mockRejectedValueOnce(new Error("反馈服务不可用"))
+      .mockResolvedValueOnce({ feedback: { ID: 1, Rating: "up", Reason: null } });
+    globalThis.localStorage.setItem("lb_chat_session:material:31", "material-31-session");
+    render(<Companion materialId={31} />);
+    await screen.findByText("历史回答");
+
+    const up = screen.getByRole("button", { name: "点赞" }) as HTMLButtonElement;
+    fireEvent.click(up);
+    expect(await screen.findByText("反馈服务不可用")).not.toBeNull();
+    expect(up.disabled).toBe(false);
+    expect(up.className).toBe("");
+
+    fireEvent.click(up);
+    await waitFor(() => expect(up.className).toBe("selected"));
+    expect(api.submitFeedback).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let a cancelled history request overwrite a new conversation", async () => {
+    const history = deferred<{ session_id: string; messages: AgentMessage[] }>();
+    vi.mocked(api.listSessions).mockResolvedValue({ sessions });
+    vi.mocked(api.getSession).mockReturnValue(history.promise);
+    globalThis.localStorage.setItem("lb_chat_session:material:31", "material-31-session");
+    render(<Companion materialId={31} />);
+
+    await waitFor(() => expect(api.getSession).toHaveBeenCalledWith("material-31-session"));
+    fireEvent.click(screen.getByRole("button", { name: "新对话" }));
+    await act(async () =>
+      history.resolve({ session_id: "material-31-session", messages: restoredHistory }),
+    );
+
+    expect(screen.queryByText("历史回答")).toBeNull();
+    expect(globalThis.localStorage.getItem("lb_chat_session:material:31")).toBeNull();
+    expect((screen.getByPlaceholderText("针对当前资料提问…") as HTMLInputElement).disabled).toBe(
+      false,
+    );
+  });
+
   it("streams tokens and citations, prevents duplicate sends, and restores the composer", async () => {
     const stream = deferred<void>();
+    const onOpenMaterial = vi.fn();
     let handlers: Parameters<typeof api.chatStream>[1] | undefined;
     vi.mocked(api.chatStream).mockImplementation((_, nextHandlers) => {
       handlers = nextHandlers;
       return stream.promise;
     });
-    render(<Companion materialId={31} />);
+    render(<Companion materialId={31} onOpenMaterial={onOpenMaterial} />);
     const input = screen.getByPlaceholderText("针对当前资料提问…") as HTMLInputElement;
     fireEvent.change(input, { target: { value: "  什么是惯性？  " } });
     fireEvent.keyDown(input, { key: "Enter" });
@@ -175,19 +407,88 @@ describe("Companion", () => {
       if (!handlers) throw new Error("chat handlers unavailable");
       handlers.onToken("牛顿");
       handlers.onToken("第一定律");
-      handlers.onCitations?.([
-        { team_id: 1, material_id: 31, chapter: "第一章", chunk_idx: 0 },
+      const citations: Citation[] = [
+        {
+          team_id: 1,
+          material_id: 31,
+          chapter: "第一章",
+          chunk_idx: 0,
+          page_number: 3,
+          asset_id: 81,
+        },
         { team_id: 1, material_id: 32, chapter: "", chunk_idx: 1 },
-      ]);
+      ];
+      handlers.onCitations?.(citations);
+      handlers.onDone?.({
+        session_id: "session-31",
+        message_id: 91,
+        citations,
+        stage_ms: { analyze_query: 120, retrieve: 80, rerank: 240, expand: Number.NaN },
+        degraded_stages: ["embedding", "rerank", "rerank"],
+      });
       handlers.onEnd();
       stream.resolve();
     });
 
     await waitFor(() => expect(screen.getByText("牛顿第一定律")).not.toBeNull());
-    expect(screen.getByText("资料#31·第一章")).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "资料#31·第 3 页" }));
+    expect(onOpenMaterial).toHaveBeenCalledWith({ materialId: 31, pageNumber: 3, assetId: 81 });
     expect(screen.getByText("资料#32")).not.toBeNull();
+    expect(screen.getByRole("status").textContent).toBe(
+      "本次检索使用了降级路径：语义检索、候选精排",
+    );
+    expect(screen.getByText("问题理解").closest("div")?.textContent).toBe("问题理解120 ms");
+    expect(screen.getByText("知识库召回").closest("div")?.textContent).toBe("知识库召回80 ms");
+    expect(screen.getByText("候选精排").closest("div")?.textContent).toBe("候选精排240 ms");
+    expect(screen.queryByText("上下文扩展")).toBeNull();
     expect(screen.getByRole("button", { name: "发送" })).not.toBeNull();
     expect(input.disabled).toBe(false);
+  });
+
+  it("ignores late stream events after switching to another material scope", async () => {
+    const stream = deferred<void>();
+    let handlers: Parameters<typeof api.chatStream>[1] | undefined;
+    vi.mocked(api.chatStream).mockImplementation((_, nextHandlers) => {
+      handlers = nextHandlers;
+      return stream.promise;
+    });
+    const { rerender } = render(<Companion materialId={31} />);
+    fireEvent.change(screen.getByPlaceholderText("针对当前资料提问…"), {
+      target: { value: "旧资料问题" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(api.chatStream).toHaveBeenCalledOnce());
+
+    rerender(<Companion materialId={32} />);
+    await waitFor(() =>
+      expect((screen.getByPlaceholderText("针对当前资料提问…") as HTMLInputElement).disabled).toBe(
+        false,
+      ),
+    );
+    await act(async () => {
+      if (!handlers) throw new Error("chat handlers unavailable");
+      handlers.onMeta?.({
+        session_id: "old-session",
+        trace_id: "trace-old",
+        rewritten_query: "旧问题改写",
+        rewrite_applied: true,
+      });
+      handlers.onToken("不应显示的旧回答");
+      handlers.onDone?.({
+        session_id: "old-session",
+        message_id: 99,
+        citations: [],
+        stage_ms: {},
+        degraded_stages: [],
+      });
+      handlers.onEnd();
+      stream.resolve();
+    });
+
+    expect(screen.queryByText("旧资料问题")).toBeNull();
+    expect(screen.queryByText("不应显示的旧回答")).toBeNull();
+    expect(screen.queryByText("已理解为：旧问题改写")).toBeNull();
+    expect(globalThis.localStorage.getItem("lb_chat_session:material:32")).toBeNull();
   });
 
   it("renders SSE callback errors and releases the busy state", async () => {

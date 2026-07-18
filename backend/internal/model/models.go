@@ -157,10 +157,11 @@ func (LearningRecord) TableName() string { return "learning_records" }
 
 // AgentSession 会话（F5）。
 type AgentSession struct {
-	ID        string    `gorm:"primaryKey;column:id"`
-	UserID    int64     `gorm:"column:user_id"`
-	Title     *string   `gorm:"column:title"`
-	CreatedAt time.Time `gorm:"column:created_at"`
+	ID         string    `gorm:"primaryKey;column:id"`
+	UserID     int64     `gorm:"column:user_id"`
+	MaterialID *int64    `gorm:"column:material_id;index"`
+	Title      *string   `gorm:"column:title"`
+	CreatedAt  time.Time `gorm:"column:created_at"`
 }
 
 func (AgentSession) TableName() string { return "agent_sessions" }

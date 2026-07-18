@@ -25,7 +25,10 @@ func TestChatForwardsAgentTraceIDToClient(t *testing.T) {
 		case "/chat":
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("X-Trace-ID", traceID)
-			_, err := w.Write([]byte("data: {\"type\":\"done\",\"citations\":[]}\n\n"))
+			_, err := w.Write([]byte(
+				"data: {\"type\":\"token\",\"text\":\"有据回答\"}\n\n" +
+					"data: {\"type\":\"done\",\"citations\":[]}\n\n",
+			))
 			require.NoError(t, err)
 		default:
 			http.NotFound(w, r)
@@ -49,4 +52,6 @@ func TestChatForwardsAgentTraceIDToClient(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
 	assert.Equal(t, traceID, resp.Header().Get("X-Trace-ID"))
+	assert.Contains(t, resp.Body.String(), `"type":"done"`)
+	assert.NotContains(t, resp.Body.String(), `"message_id":0`)
 }

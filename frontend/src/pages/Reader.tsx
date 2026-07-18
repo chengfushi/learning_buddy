@@ -1,13 +1,30 @@
-import { useEffect, useState, type FormEvent } from "react";
+import {
+  Children,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import { api, type Material, type MaterialAsset, type MaterialNote } from "../api";
+import type { MaterialFocus } from "../material-navigation";
+
+function pageNumberFromHeading(children: ReactNode): number | undefined {
+  const text = Children.toArray(children).join("").trim();
+  const match = /^第\s*(\d+)\s*页$/.exec(text);
+  return match ? Number(match[1]) : undefined;
+}
 
 export default function Reader({
   materialId,
+  focus,
   onBack,
   onAsk,
 }: {
   materialId: number;
+  focus?: MaterialFocus;
   onBack: () => void;
   onAsk: (materialId: number) => void;
 }) {
@@ -18,50 +35,117 @@ export default function Reader({
   const [note, setNote] = useState("");
   const [loadingMaterial, setLoadingMaterial] = useState(true);
   const [loadingNotes, setLoadingNotes] = useState(true);
+  const [assetsLoaded, setAssetsLoaded] = useState(false);
   const [err, setErr] = useState("");
   const [notesErr, setNotesErr] = useState("");
+  const pageRefs = useRef(new Map<number, HTMLHeadingElement>());
+  const assetRefs = useRef(new Map<number, HTMLElement>());
+  const lastFocusedKey = useRef("");
+  const loadRequestRef = useRef(0);
+  const noteMutationRef = useRef(0);
+  const materialIdRef = useRef(materialId);
 
   const load = () => {
+    const targetMaterialId = materialId;
+    const loadRequest = ++loadRequestRef.current;
+    const isCurrentLoad = () =>
+      loadRequest === loadRequestRef.current && targetMaterialId === materialIdRef.current;
     setMaterial(null);
     setNotes([]);
     setAssets([]);
     setSourceURL("");
     setLoadingMaterial(true);
     setLoadingNotes(true);
+    setAssetsLoaded(false);
     setErr("");
     setNotesErr("");
     api
-      .getMaterial(materialId)
-      .then((r) => setMaterial(r.material))
-      .catch((e) => setErr(e instanceof Error ? e.message : "加载失败"))
-      .finally(() => setLoadingMaterial(false));
+      .getMaterial(targetMaterialId)
+      .then((r) => {
+        if (isCurrentLoad()) setMaterial(r.material);
+      })
+      .catch((e) => {
+        if (isCurrentLoad()) setErr(e instanceof Error ? e.message : "加载失败");
+      })
+      .finally(() => {
+        if (isCurrentLoad()) setLoadingMaterial(false);
+      });
     api
-      .listNotes(materialId)
-      .then((r) => setNotes(r.notes))
-      .catch((e) => setNotesErr(e instanceof Error ? e.message : "笔记加载失败"))
-      .finally(() => setLoadingNotes(false));
+      .listNotes(targetMaterialId)
+      .then((r) => {
+        if (isCurrentLoad()) setNotes(r.notes);
+      })
+      .catch((e) => {
+        if (isCurrentLoad()) setNotesErr(e instanceof Error ? e.message : "笔记加载失败");
+      })
+      .finally(() => {
+        if (isCurrentLoad()) setLoadingNotes(false);
+      });
     api
-      .listMaterialAssets(materialId)
-      .then((result) => setAssets(result.assets))
-      .catch(() => undefined);
+      .listMaterialAssets(targetMaterialId)
+      .then((result) => {
+        if (isCurrentLoad()) setAssets(result.assets);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (isCurrentLoad()) setAssetsLoaded(true);
+      });
     api
-      .getMaterialSourceURL(materialId)
-      .then((result) => setSourceURL(result.url))
+      .getMaterialSourceURL(targetMaterialId)
+      .then((result) => {
+        if (isCurrentLoad()) setSourceURL(result.url);
+      })
       .catch(() => undefined);
   };
+  useLayoutEffect(() => {
+    materialIdRef.current = materialId;
+    loadRequestRef.current += 1;
+    noteMutationRef.current += 1;
+    setNote("");
+    return () => {
+      loadRequestRef.current += 1;
+      noteMutationRef.current += 1;
+    };
+  }, [materialId]);
+
   useEffect(() => {
     load();
   }, [materialId]);
 
+  useEffect(() => {
+    lastFocusedKey.current = "";
+  }, [materialId, focus?.pageNumber, focus?.assetId]);
+
+  useEffect(() => {
+    if (!material || (!focus?.pageNumber && !focus?.assetId)) return;
+    if (focus.assetId && !assetsLoaded) return;
+
+    const target =
+      (focus.assetId ? assetRefs.current.get(focus.assetId) : undefined) ??
+      (focus.pageNumber ? pageRefs.current.get(focus.pageNumber) : undefined);
+    if (!target) return;
+
+    const focusKey = `${materialId}:${focus.assetId ?? ""}:${focus.pageNumber ?? ""}`;
+    if (lastFocusedKey.current === focusKey) return;
+    lastFocusedKey.current = focusKey;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.focus({ preventScroll: true });
+  }, [assetsLoaded, focus?.assetId, focus?.pageNumber, material, materialId]);
+
   const addNote = async (e: FormEvent) => {
     e.preventDefault();
+    const targetMaterialId = materialId;
+    const noteMutation = ++noteMutationRef.current;
+    const isCurrentMutation = () =>
+      noteMutation === noteMutationRef.current && targetMaterialId === materialIdRef.current;
     setErr("");
     try {
-      await api.createNote(materialId, note);
+      await api.createNote(targetMaterialId, note);
+      if (!isCurrentMutation()) return;
       setNote("");
       load();
     } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : "笔记保存失败");
+      if (isCurrentMutation()) setErr(ex instanceof Error ? ex.message : "笔记保存失败");
     }
   };
 
@@ -92,14 +176,43 @@ export default function Reader({
           )}
           {material.Summary && <div className="material-summary">{material.Summary}</div>}
           <div className="prose">
-            <ReactMarkdown>
+            <ReactMarkdown
+              components={{
+                h2: ({ children }) => {
+                  const pageNumber = pageNumberFromHeading(children);
+                  if (pageNumber === undefined) return <h2>{children}</h2>;
+                  return (
+                    <h2
+                      id={`page-${pageNumber}`}
+                      ref={(node) => {
+                        if (node) pageRefs.current.set(pageNumber, node);
+                        else pageRefs.current.delete(pageNumber);
+                      }}
+                      tabIndex={-1}
+                      className={focus?.pageNumber === pageNumber ? "citation-focus" : undefined}
+                    >
+                      {children}
+                    </h2>
+                  );
+                },
+              }}
+            >
               {material.Content || "（暂无正文，可能是未解析的文件类资料）"}
             </ReactMarkdown>
           </div>
           {assets.length > 0 && (
             <section className="asset-gallery" aria-label="资料图片">
               {assets.map((asset) => (
-                <figure key={asset.id} id={`asset-${asset.id}`}>
+                <figure
+                  key={asset.id}
+                  id={`asset-${asset.id}`}
+                  ref={(node) => {
+                    if (node) assetRefs.current.set(asset.id, node);
+                    else assetRefs.current.delete(asset.id);
+                  }}
+                  tabIndex={-1}
+                  className={focus?.assetId === asset.id ? "citation-focus" : undefined}
+                >
                   <img
                     src={asset.url}
                     alt={asset.caption || `第 ${asset.page_number ?? "?"} 页图片`}

@@ -1,5 +1,13 @@
-import { useEffect, useState } from "react";
-import { api, type Citation, type Exercise, type StudyPlan } from "../api";
+import { useEffect, useRef, useState } from "react";
+import {
+  api,
+  type AgentMessage,
+  type AgentSession,
+  type Citation,
+  type Exercise,
+  type StudyPlan,
+} from "../api";
+import type { MaterialNavigationTarget } from "../material-navigation";
 
 interface Msg {
   role: "user" | "assistant";
@@ -7,6 +15,47 @@ interface Msg {
   citations?: Citation[];
   messageId?: number;
   feedback?: "up" | "down";
+  stageMs?: Record<string, number>;
+  degradedStages?: string[];
+}
+
+const stageLabels: Record<string, string> = {
+  analyze_query: "问题理解",
+  query_analysis: "问题理解",
+  embedding: "语义检索",
+  retrieve: "知识库召回",
+  rerank: "候选精排",
+  expand: "上下文扩展",
+};
+
+function stageLabel(stage: string): string {
+  return stageLabels[stage] ?? stage.replace(/_/g, " ");
+}
+
+function validStageTimings(stageMs?: Record<string, number>): [string, number][] {
+  return Object.entries(stageMs ?? {}).filter(
+    (entry) => Number.isFinite(entry[1]) && entry[1] >= 0,
+  );
+}
+
+function sessionsForScope(sessions: AgentSession[], materialId?: number): AgentSession[] {
+  return sessions.filter((session) =>
+    materialId === undefined ? session.MaterialID === null : session.MaterialID === materialId,
+  );
+}
+
+function restoredMessages(messages: AgentMessage[]): Msg[] {
+  return messages.flatMap((message) => {
+    if (message.Role !== "user" && message.Role !== "assistant") return [];
+    return [
+      {
+        role: message.Role,
+        content: message.Content,
+        citations: message.Citations,
+        messageId: message.Role === "assistant" ? message.ID : undefined,
+      },
+    ];
+  });
 }
 
 function sessionStorageKey(materialId?: number): string {
@@ -29,7 +78,7 @@ export default function Companion({
   onOpenMaterial,
 }: {
   materialId?: number;
-  onOpenMaterial?: (materialId: number) => void;
+  onOpenMaterial?: (target: MaterialNavigationTarget) => void;
 }) {
   const [tab, setTab] = useState<"chat" | "plan" | "quiz">("chat");
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -38,6 +87,14 @@ export default function Companion({
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [sessions, setSessions] = useState<AgentSession[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [sessionsErr, setSessionsErr] = useState("");
+  const historyRequestRef = useRef(0);
+  const chatRequestRef = useRef(0);
+  const feedbackPendingRef = useRef(new Set<number>());
+  const [feedbackPending, setFeedbackPending] = useState<Set<number>>(() => new Set());
 
   const [goal, setGoal] = useState("");
   const [deadline, setDeadline] = useState("");
@@ -52,10 +109,87 @@ export default function Companion({
   const [answeringId, setAnsweringId] = useState<number | null>(null);
 
   useEffect(() => {
-    setSessionId(storedSession(materialId));
+    const persistedSession = storedSession(materialId);
+    const historyRequest = ++historyRequestRef.current;
+    chatRequestRef.current += 1;
+    let active = true;
+    setBusy(false);
+    setErr("");
+    setSessionId(persistedSession);
     setMessages([]);
     setRewrittenQuery("");
+    setSessions([]);
+    setSessionsErr("");
+    setSessionsLoading(true);
+    setHistoryLoading(false);
+    api
+      .listSessions()
+      .then(async (result) => {
+        if (!active) return;
+        const scoped = sessionsForScope(result.sessions, materialId);
+        setSessions(scoped);
+        if (!persistedSession || !scoped.some((session) => session.ID === persistedSession)) {
+          if (persistedSession) {
+            globalThis.localStorage?.removeItem(sessionStorageKey(materialId));
+            setSessionId(undefined);
+          }
+          return;
+        }
+        if (historyRequest !== historyRequestRef.current) return;
+        setHistoryLoading(true);
+        const history = await api.getSession(persistedSession);
+        if (!active || historyRequest !== historyRequestRef.current) return;
+        setMessages(restoredMessages(history.messages));
+      })
+      .catch((error) => {
+        if (active && historyRequest === historyRequestRef.current) {
+          setSessionsErr(error instanceof Error ? error.message : "会话历史加载失败");
+        }
+      })
+      .finally(() => {
+        if (active) {
+          setSessionsLoading(false);
+          if (historyRequest === historyRequestRef.current) setHistoryLoading(false);
+        }
+      });
+    return () => {
+      active = false;
+      historyRequestRef.current += 1;
+      chatRequestRef.current += 1;
+    };
   }, [materialId]);
+
+  const openSession = async (selectedSession: AgentSession) => {
+    if (busy || historyLoading) return;
+    const historyRequest = ++historyRequestRef.current;
+    setHistoryLoading(true);
+    setSessionsErr("");
+    try {
+      const history = await api.getSession(selectedSession.ID);
+      if (historyRequest !== historyRequestRef.current) return;
+      setMessages(restoredMessages(history.messages));
+      setSessionId(history.session_id);
+      setRewrittenQuery("");
+      globalThis.localStorage?.setItem(sessionStorageKey(materialId), history.session_id);
+    } catch (error) {
+      if (historyRequest === historyRequestRef.current) {
+        setSessionsErr(error instanceof Error ? error.message : "会话历史加载失败");
+      }
+    } finally {
+      if (historyRequest === historyRequestRef.current) setHistoryLoading(false);
+    }
+  };
+
+  const startNewConversation = () => {
+    if (busy) return;
+    historyRequestRef.current += 1;
+    setHistoryLoading(false);
+    setSessionsErr("");
+    setSessionId(undefined);
+    setMessages([]);
+    setRewrittenQuery("");
+    globalThis.localStorage?.removeItem(sessionStorageKey(materialId));
+  };
 
   const updateLastAssistant = (update: Partial<Msg>) =>
     setMessages((current) => {
@@ -67,6 +201,10 @@ export default function Companion({
   const ask = async () => {
     const q = input.trim();
     if (!q || busy) return;
+    historyRequestRef.current += 1;
+    setHistoryLoading(false);
+    const chatRequest = ++chatRequestRef.current;
+    const isCurrentRequest = () => chatRequest === chatRequestRef.current;
     setInput("");
     setBusy(true);
     setErr("");
@@ -78,52 +216,84 @@ export default function Companion({
         { question: q, material_id: materialId, session_id: sessionId },
         {
           onToken: (text) => {
+            if (!isCurrentRequest()) return;
             acc += text;
             updateLastAssistant({ content: acc });
           },
-          onCitations: (citations) => updateLastAssistant({ citations }),
+          onCitations: (citations) => {
+            if (isCurrentRequest()) updateLastAssistant({ citations });
+          },
           onMeta: (meta) => {
+            if (!isCurrentRequest()) return;
             setSessionId(meta.session_id);
             globalThis.localStorage?.setItem(sessionStorageKey(materialId), meta.session_id);
             if (meta.rewrite_applied) setRewrittenQuery(meta.rewritten_query);
           },
           onDone: (done) => {
+            if (!isCurrentRequest()) return;
             setSessionId(done.session_id);
             globalThis.localStorage?.setItem(sessionStorageKey(materialId), done.session_id);
-            updateLastAssistant({ citations: done.citations, messageId: done.message_id });
+            updateLastAssistant({
+              citations: done.citations,
+              messageId: done.message_id,
+              stageMs: done.stage_ms,
+              degradedStages: done.degraded_stages,
+            });
+            api
+              .listSessions()
+              .then((result) => {
+                if (isCurrentRequest()) {
+                  setSessions(sessionsForScope(result.sessions, materialId));
+                }
+              })
+              .catch(() => undefined);
           },
-          onEnd: () => setBusy(false),
+          onEnd: () => {
+            if (isCurrentRequest()) setBusy(false);
+          },
           onError: (message) => {
+            if (!isCurrentRequest()) return;
             updateLastAssistant({ content: `出错了：${message}` });
             setBusy(false);
           },
         },
       );
     } catch (ex) {
-      updateLastAssistant({
-        content: `出错了：${ex instanceof Error ? ex.message : "对话请求失败"}`,
-      });
+      if (isCurrentRequest()) {
+        updateLastAssistant({
+          content: `出错了：${ex instanceof Error ? ex.message : "对话请求失败"}`,
+        });
+      }
     } finally {
-      setBusy(false);
+      if (isCurrentRequest()) setBusy(false);
     }
   };
 
-  const feedback = async (index: number, rating: "up" | "down") => {
-    const message = messages[index];
-    if (!message.messageId) return;
+  const feedback = async (messageId: number, rating: "up" | "down") => {
+    if (feedbackPendingRef.current.has(messageId)) return;
     const reason =
       rating === "down" ? window.prompt("哪里没有帮到你？（选填，最多 500 字）") : undefined;
-    if (reason !== null && reason !== undefined && reason.length > 500) {
+    if (rating === "down" && reason === null) return;
+    const normalizedReason = reason?.trim() || undefined;
+    if (normalizedReason !== undefined && [...normalizedReason].length > 500) {
       setErr("反馈原因不能超过 500 字");
       return;
     }
+    feedbackPendingRef.current.add(messageId);
+    setFeedbackPending(new Set(feedbackPendingRef.current));
+    setErr("");
     try {
-      await api.submitFeedback(message.messageId, rating, reason ?? undefined);
+      await api.submitFeedback(messageId, rating, normalizedReason);
       setMessages((current) =>
-        current.map((item, i) => (i === index ? { ...item, feedback: rating } : item)),
+        current.map((item) =>
+          item.messageId === messageId ? { ...item, feedback: rating } : item,
+        ),
       );
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : "反馈提交失败");
+    } finally {
+      feedbackPendingRef.current.delete(messageId);
+      setFeedbackPending(new Set(feedbackPendingRef.current));
     }
   };
 
@@ -188,8 +358,36 @@ export default function Companion({
 
       {tab === "chat" && (
         <div className="chat">
+          <div className="chat-history-bar">
+            <details>
+              <summary>历史会话（{sessions.length}）</summary>
+              <div className="session-list">
+                {sessionsLoading && <div className="muted small">正在加载会话…</div>}
+                {sessionsErr && <div className="err small">{sessionsErr}</div>}
+                {!sessionsLoading && !sessionsErr && sessions.length === 0 && (
+                  <div className="muted small">当前范围还没有历史会话。</div>
+                )}
+                {sessions.map((session) => (
+                  <button
+                    key={session.ID}
+                    className={session.ID === sessionId ? "session-on" : ""}
+                    onClick={() => openSession(session)}
+                    disabled={busy || historyLoading}
+                  >
+                    {session.Title || "未命名会话"}
+                  </button>
+                ))}
+              </div>
+            </details>
+            <button className="ghost" onClick={startNewConversation} disabled={busy}>
+              新对话
+            </button>
+          </div>
           {rewrittenQuery && <div className="query-rewrite">已理解为：{rewrittenQuery}</div>}
           <div className="messages">
+            {!sessionsLoading && !historyLoading && messages.length === 0 && (
+              <div className="muted small">输入问题开始一段新对话。</div>
+            )}
             {messages.map((message, index) => (
               <div key={index} className={message.role === "user" ? "bubble user" : "bubble"}>
                 <div className="bubble-text">{message.content || "…"}</div>
@@ -200,7 +398,13 @@ export default function Companion({
                       <button
                         key={citation.chunk_id ?? citationIndex}
                         className="cite"
-                        onClick={() => onOpenMaterial?.(citation.material_id)}
+                        onClick={() =>
+                          onOpenMaterial?.({
+                            materialId: citation.material_id,
+                            pageNumber: citation.page_number,
+                            assetId: citation.asset_id,
+                          })
+                        }
                       >
                         {citation.title || `资料#${citation.material_id}`}
                         {citation.page_number
@@ -212,20 +416,41 @@ export default function Companion({
                     ))}
                   </div>
                 )}
+                {!!message.degradedStages?.length && (
+                  <div className="rag-degraded" role="status">
+                    本次检索使用了降级路径：
+                    {[...new Set(message.degradedStages)].map(stageLabel).join("、")}
+                  </div>
+                )}
+                {validStageTimings(message.stageMs).length > 0 && (
+                  <details className="rag-timings">
+                    <summary>检索耗时</summary>
+                    <dl>
+                      {validStageTimings(message.stageMs).map(([stage, duration]) => (
+                        <div key={stage}>
+                          <dt>{stageLabel(stage)}</dt>
+                          <dd>{duration} ms</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </details>
+                )}
                 {message.role === "assistant" && message.messageId && (
                   <div className="feedback-controls">
                     <span>这个回答有帮助吗？</span>
                     <button
                       aria-label="点赞"
                       className={message.feedback === "up" ? "selected" : ""}
-                      onClick={() => feedback(index, "up")}
+                      disabled={feedbackPending.has(message.messageId)}
+                      onClick={() => feedback(message.messageId as number, "up")}
                     >
                       👍
                     </button>
                     <button
                       aria-label="点踩"
                       className={message.feedback === "down" ? "selected" : ""}
-                      onClick={() => feedback(index, "down")}
+                      disabled={feedbackPending.has(message.messageId)}
+                      onClick={() => feedback(message.messageId as number, "down")}
                     >
                       👎
                     </button>
@@ -240,9 +465,9 @@ export default function Companion({
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && ask()}
-              disabled={busy}
+              disabled={busy || historyLoading}
             />
-            <button className="primary" onClick={ask} disabled={busy}>
+            <button className="primary" onClick={ask} disabled={busy || historyLoading}>
               {busy ? "思考中…" : "发送"}
             </button>
           </div>

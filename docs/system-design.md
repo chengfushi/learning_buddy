@@ -1,7 +1,7 @@
 # 智能学伴系统 · 系统设计文档
 
-> 版本：v0.5 · 状态：设计稿（修订） · 最后更新：2026-07-17
-> 变更：v0.5 增加 RAG v2 的对象存储解析管道、混合召回、Rerank、父资料扩展、反馈闭环和影子索引灰度；资料可见性仍由 Backend repository 作为唯一真源。
+> 版本：v0.6 · 状态：设计稿（修订） · 最后更新：2026-07-18
+> 变更：v0.6 为会话增加可选资料作用域，禁止全局会话与资料会话混用；资料可见性仍由 Backend repository 作为唯一真源。
 
 ---
 
@@ -112,7 +112,7 @@
 
 ### 5.3 AI 辅助学习模式
 
-- **智能答疑**：选中文本/整页提问，Backend repository 先在用户可见范围内完成 RAG 检索，Agent 仅基于已授权 chunks 回答并附引用（标明来源 team / 资料）。
+- **智能答疑**：选中文本/整页提问，Backend repository 先在用户可见范围内完成 RAG 检索，Agent 仅基于已授权 chunks 回答并附引用；引用可打开资料并定位到对应 PDF 页码或图片资产，发生检索降级时展示回退阶段与各阶段耗时。
 - **学习规划**：Planner Agent 按目标与期限生成计划。
 - **智能测评**：Evaluator Agent 生成测验并批改。
 - **对话式伴学**：多轮对话、记忆上下文、可回溯历史会话。
@@ -215,6 +215,8 @@ handler (Gin) → service (业务/RBAC/team) → repository (GORM) → PostgreSQ
 | POST | `/api/agent/plan` | 生成学习计划（落 `study_plans`） | 是 |
 | POST | `/api/agent/quiz` | 生成测评（落 `exercises`） | 是 |
 | GET | `/api/agent/sessions` | 我的会话列表 | 是 |
+| GET | `/api/agent/sessions/:id` | 恢复本人会话的结构化消息与引用 | 是 |
+| PUT | `/api/agent/messages/:id/feedback` | 幂等评价本人会话中的助手回答 | 是 |
 
 > 所有写接口受 RBAC 约束；`/api/agent/*` 先由 Backend repository 应用统一可见性谓词并执行 pgvector top-k，再向 Agent 下发已授权 chunks。Agent Parser 仅持解析所需的最小数据库权限，不可读取用户、成员或认证表。
 
@@ -340,6 +342,7 @@ CREATE INDEX idx_lr_user ON learning_records(user_id);
 CREATE TABLE agent_sessions (
   id          UUID PRIMARY KEY,
   user_id     BIGINT NOT NULL REFERENCES users(id),
+  material_id BIGINT REFERENCES materials(id) ON DELETE CASCADE, -- NULL=全局会话，否则固定资料作用域
   title       VARCHAR(200),
   created_at  TIMESTAMPTZ DEFAULT now()
 );
@@ -347,7 +350,7 @@ CREATE INDEX idx_as_user ON agent_sessions(user_id);
 
 CREATE TABLE agent_messages (
   id          BIGSERIAL PRIMARY KEY,
-  session_id  UUID REFERENCES agent_sessions(id),
+  session_id  UUID REFERENCES agent_sessions(id) ON DELETE CASCADE,
   role        VARCHAR(20),
   content     TEXT,
   citations   JSONB,   -- [{team_id, material_id, chapter, chunk_idx}]
@@ -359,7 +362,7 @@ CREATE TABLE exercises (
   id          BIGSERIAL PRIMARY KEY,
   user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   material_id BIGINT REFERENCES materials(id),
-  session_id  UUID REFERENCES agent_sessions(id),
+  session_id  UUID REFERENCES agent_sessions(id) ON DELETE SET NULL,
   question    TEXT NOT NULL,
   options     JSONB,
   answer_key  TEXT,
