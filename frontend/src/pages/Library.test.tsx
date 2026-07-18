@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, type Material, type Team } from "../api";
+import { api, type Material, type MaterialProcessing, type Team } from "../api";
 import Library from "./Library";
 
 const writableTeam: Team = {
@@ -51,6 +51,13 @@ const readyMaterial: Material = {
   ParseGeneration: 1,
   ParseError: null,
   Shared: true,
+};
+
+const parsingMaterial: Material = {
+  ...readyMaterial,
+  ID: 13,
+  Title: "正在解析的资料",
+  ParseStatus: "parsing",
 };
 
 interface Deferred<T> {
@@ -148,12 +155,106 @@ describe("Library", () => {
 
     const teamItems = container.querySelectorAll<HTMLElement>(".side-item");
     fireEvent.click(teamItems[1]);
+    expect(screen.queryByText(readyMaterial.Title)).toBeNull();
+    expect(screen.queryByRole("button", { name: "+ 新建资料" })).toBeNull();
 
     await waitFor(() => expect(screen.getByText("该知识库暂无资料。")).not.toBeNull());
     expect(screen.queryByText(readyMaterial.Title)).toBeNull();
     expect(screen.queryByRole("button", { name: "+ 新建资料" })).toBeNull();
     expect(teamItems[1].className).toBe("side-item on");
     expect(teamItems[0].className).toBe("side-item");
+  });
+
+  it("ignores a writable material response that arrives after switching to a read-only team", async () => {
+    const writableMaterials = deferred<{ materials: Material[]; can_write: boolean }>();
+    const readOnlyMaterials = deferred<{ materials: Material[]; can_write: boolean }>();
+    vi.mocked(api.listTeams).mockResolvedValue({ teams: [writableTeam, readOnlyTeam] });
+    vi.mocked(api.listTeamMaterials).mockImplementation((teamID) =>
+      teamID === writableTeam.ID ? writableMaterials.promise : readOnlyMaterials.promise,
+    );
+    render(<Library onOpenMaterial={vi.fn()} />);
+    await waitFor(() => expect(api.listTeamMaterials).toHaveBeenCalledWith(writableTeam.ID));
+
+    fireEvent.click(screen.getByText(readOnlyTeam.Name));
+    await waitFor(() => expect(api.listTeamMaterials).toHaveBeenCalledWith(readOnlyTeam.ID));
+    await act(async () => readOnlyMaterials.resolve({ materials: [], can_write: false }));
+    await screen.findByText("该知识库暂无资料。");
+    await act(async () =>
+      writableMaterials.resolve({ materials: [readyMaterial], can_write: true }),
+    );
+
+    expect(screen.queryByText(readyMaterial.Title)).toBeNull();
+    expect(screen.queryByRole("button", { name: "+ 新建资料" })).toBeNull();
+    expect(
+      screen.getByText(readOnlyTeam.Name, { selector: ".side-item span" }).closest(".side-item")
+        ?.className,
+    ).toBe("side-item on");
+  });
+
+  it("ignores terminal processing results from a team that is no longer selected", async () => {
+    const processing = deferred<{ processing: MaterialProcessing | null }>();
+    vi.spyOn(api, "getMaterialProcessing").mockReturnValue(processing.promise);
+    vi.mocked(api.listTeams).mockResolvedValue({ teams: [writableTeam, readOnlyTeam] });
+    vi.mocked(api.listTeamMaterials).mockImplementation(async (teamID) =>
+      teamID === writableTeam.ID
+        ? { materials: [parsingMaterial], can_write: true }
+        : { materials: [], can_write: false },
+    );
+    render(<Library onOpenMaterial={vi.fn()} />);
+    await screen.findByText(parsingMaterial.Title);
+    await waitFor(() => expect(api.getMaterialProcessing).toHaveBeenCalledWith(parsingMaterial.ID));
+
+    fireEvent.click(screen.getByText(readOnlyTeam.Name));
+    await screen.findByText("该知识库暂无资料。");
+    const timeoutSpy = vi.spyOn(window, "setTimeout");
+    await act(async () =>
+      processing.resolve({
+        processing: {
+          ID: 91,
+          MaterialID: parsingMaterial.ID,
+          ParseGeneration: 1,
+          IndexVersion: "rag-v2",
+          Stage: "persist",
+          Status: "done",
+          Progress: { percent: 100 },
+        },
+      }),
+    );
+
+    expect(screen.queryByText(/阶段：persist/)).toBeNull();
+    expect(timeoutSpy.mock.calls.some((call) => call[1] === 300)).toBe(false);
+    expect(api.listTeamMaterials).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let an old upload completion reset or reload the newly selected team", async () => {
+    const createResult = deferred<{ material: Material }>();
+    vi.mocked(api.listTeams).mockResolvedValue({ teams: [writableTeam, readOnlyTeam] });
+    vi.mocked(api.listTeamMaterials).mockImplementation(async (teamID) => ({
+      materials: [],
+      can_write: teamID === writableTeam.ID,
+    }));
+    vi.mocked(api.createMaterial).mockReturnValue(createResult.promise);
+    const { container } = render(<Library onOpenMaterial={vi.fn()} />);
+    await screen.findByRole("button", { name: "+ 新建资料" });
+    fireEvent.click(screen.getByRole("button", { name: "+ 新建资料" }));
+    fireEvent.change(screen.getByPlaceholderText("标题"), { target: { value: "旧团队资料" } });
+    fireEvent.change(
+      screen.getByPlaceholderText("正文内容（保存后自动解析入库，可用于 AI 答疑）"),
+      { target: { value: "旧团队正文" } },
+    );
+    const form = container.querySelector("form");
+    if (!(form instanceof HTMLFormElement)) throw new Error("material form not found");
+    fireEvent.submit(form);
+    await waitFor(() => expect(api.createMaterial).toHaveBeenCalledOnce());
+
+    fireEvent.click(screen.getByText(readOnlyTeam.Name));
+    await screen.findByText("该知识库暂无资料。");
+    await act(async () => createResult.resolve({ material: readyMaterial }));
+
+    expect(screen.queryByText(readyMaterial.Title)).toBeNull();
+    expect(screen.queryByPlaceholderText("标题")).toBeNull();
+    expect(api.listTeamMaterials).toHaveBeenCalledTimes(2);
+    expect(api.listTeamMaterials).toHaveBeenLastCalledWith(readOnlyTeam.ID);
   });
 
   it("creates a text material, resets the form, and reloads the selected team", async () => {
