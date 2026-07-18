@@ -120,8 +120,10 @@ func (h *Handlers) chat(c *gin.Context) {
 	var answer strings.Builder
 	var citations []service.Citation
 	var promptTokens, completionTokens int
+	agentDone, agentFailed := false, false
 	scanner := bufio.NewScanner(stream.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+streamLoop:
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data:") {
@@ -151,26 +153,45 @@ func (h *Handlers) chat(c *gin.Context) {
 				flusher.Flush()
 			}
 		case "done":
+			agentDone = true
 			citations = validateCitations(ev.Citations, prepared.Chunks)
 			promptTokens = ev.PromptTokens
 			completionTokens = ev.CompletionTokens
 			// done 由 Backend 在回答、追踪落库后补充 message_id 再转发。
+			break streamLoop
 		case "error":
+			agentFailed = true
 			_, _ = c.Writer.WriteString("data: " + payload + "\n\n")
 			if flusher != nil {
 				flusher.Flush()
 			}
+			break streamLoop
+		}
+	}
+	scanErr := scanner.Err()
+	if scanErr != nil {
+		slog.Warn("agent chat stream read failed", "session_id", sessionID, "err", scanErr)
+	}
+	completionErr := agentStreamCompletionError(agentDone, answer.String(), scanErr)
+	if !agentFailed && completionErr != "" {
+		payload, _ := json.Marshal(gin.H{"type": "error", "text": completionErr})
+		_, _ = c.Writer.WriteString("data: " + string(payload) + "\n\n")
+		if flusher != nil {
+			flusher.Flush()
 		}
 	}
 
 	// 收尾：落 assistant 消息 + token 用量
 	var assistantMessage *model.AgentMessage
-	if answer.Len() > 0 {
+	if !agentFailed && completionErr == "" {
 		assistantMessage, err = h.Svc.Conversation.AppendMessage(
 			ctx, sessionID, "assistant", answer.String(), citations,
 		)
 		if err != nil {
 			_, _ = c.Writer.WriteString("data: {\"type\":\"error\",\"text\":\"回答保存失败\"}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
 		}
 	}
 	traceID := stream.TraceID
@@ -215,22 +236,29 @@ func (h *Handlers) chat(c *gin.Context) {
 			TotalTokens:      promptTokens + completionTokens,
 		})
 	}
-	donePayload, _ := json.Marshal(gin.H{
-		"type": "done", "citations": citations, "session_id": sessionID,
-		"message_id": func() int64 {
-			if assistantMessage != nil {
-				return assistantMessage.ID
-			}
-			return 0
-		}(),
-		"stage_ms": prepared.StageMS, "degraded_stages": prepared.DegradedStages,
-	})
-	_, _ = c.Writer.WriteString("data: " + string(donePayload) + "\n\n")
+	if assistantMessage != nil {
+		donePayload, _ := json.Marshal(gin.H{
+			"type": "done", "citations": citations, "session_id": sessionID,
+			"message_id": assistantMessage.ID,
+			"stage_ms":   prepared.StageMS, "degraded_stages": prepared.DegradedStages,
+		})
+		_, _ = c.Writer.WriteString("data: " + string(donePayload) + "\n\n")
+	}
 	// 结束事件
 	_, _ = c.Writer.WriteString("data: {\"type\":\"end\"}\n\n")
 	if flusher != nil {
 		flusher.Flush()
 	}
+}
+
+func agentStreamCompletionError(done bool, answer string, scanErr error) string {
+	if scanErr != nil || !done {
+		return "回答生成中断，请重试"
+	}
+	if strings.TrimSpace(answer) == "" {
+		return "当前知识库未返回有效回答，请重试"
+	}
+	return ""
 }
 
 // validateCitations never trusts IDs returned by the model service. Every citation is rebuilt

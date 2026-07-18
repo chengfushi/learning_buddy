@@ -188,6 +188,7 @@ describe("api", () => {
     const payload = [
       'data: {"type":"token","text":"回答"}\n\n',
       'data: {"type":"done","session_id":"bad","stage_ms":{"retrieve":"slow"}}\n\n',
+      'data: {"type":"done","session_id":"session-zero","message_id":0,"citations":[]}\n\n',
       'data: {"type":"error","message":"模型超时"}\n\n',
       'data: {"type":"done","session_id":"session-1","message_id":9,',
       '"citations":[],"stage_ms":{"retrieve":80},"degraded_stages":["rerank"]}',

@@ -218,7 +218,7 @@ const ChatEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("done"),
     session_id: z.string().min(1),
-    message_id: z.number().int().nonnegative().default(0),
+    message_id: z.number().int().positive(),
     citations: z.array(CitationSchema).default([]),
     stage_ms: z.record(z.number().nonnegative()).default({}),
     degraded_stages: z.array(z.string()).default([]),
