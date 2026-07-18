@@ -1,100 +1,60 @@
-# learning_buddy 本地基础设施 + 三服务
-# 启动仅基础设施：docker compose up -d db redis minio
-# 启动全栈：docker compose up
+# learning_buddy 三个应用服务。
+# PostgreSQL、Redis、MinIO 使用宿主机已启动的独立实例，不由本 Compose 创建或挂载。
 
 services:
-  db:
-    image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_USER: learning
-      POSTGRES_PASSWORD: learning
-      POSTGRES_DB: learning_buddy
-    ports:
-      - "5432:5432"
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U learning"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  redis:
-    image: redis:7
-    ports:
-      - "6379:6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-
-  minio:
-    image: minio/minio
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    volumes:
-      - miniodata:/data
-
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    env_file:
+      - ./backend/.env
     environment:
-      DB_DSN: postgres://learning:learning@db:5432/learning_buddy?sslmode=disable
-      REDIS_ADDR: redis:6379
+      # environment 的优先级高于 env_file，基础设施连接统一取根目录 .env。
+      DB_DSN: ${DB_DSN:?DB_DSN must be set}
+      REDIS_ADDR: ${REDIS_ADDR:-host.docker.internal:6379}
       AGENT_BASE_URL: http://agent:8000
       AGENT_SHARED_SECRET: ${AGENT_SHARED_SECRET:?AGENT_SHARED_SECRET must be set}
-      MINIO_ENDPOINT: minio:9000
-      MINIO_PUBLIC_ENDPOINT: localhost:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-host.docker.internal:9000}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-localhost:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_SOURCE_BUCKET: materials-source
       MINIO_DERIVED_BUCKET: materials-derived
       ASSET_URL_TTL_SECONDS: "600"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8080:8080"
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
 
   agent:
     build: ./agent
+    env_file:
+      - ./agent/.env
     environment:
-      PG_DSN: postgres://learning:learning@db:5432/learning_buddy
-      REDIS_ADDR: redis:6379
+      PG_DSN: ${PG_DSN:?PG_DSN must be set}
+      REDIS_ADDR: ${REDIS_ADDR:-host.docker.internal:6379}
       EMBEDDING_DIM: "1024"
       AGENT_SHARED_SECRET: ${AGENT_SHARED_SECRET:?AGENT_SHARED_SECRET must be set}
       MINIO_ENABLED: "true"
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-host.docker.internal:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
       MINIO_SOURCE_BUCKET: materials-source
       MINIO_DERIVED_BUCKET: materials-derived
       RAG_INDEX_VERSION: rag-v2
       RERANK_MODEL: qwen3-rerank
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000" # 仅本地验收；生产部署应仅暴露容器内网
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
 
   frontend:
     build: ./frontend
     environment:
-      VITE_API_BASE: http://localhost:8080
+      # Vite 代理运行在 frontend 容器内，通过 Compose DNS 访问 Backend。
+      VITE_API_BASE: http://backend:8080
     ports:
       - "5173:5173"
     depends_on:
       - backend
-
-volumes:
-  pgdata:
-  miniodata:

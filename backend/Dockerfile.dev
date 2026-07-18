@@ -1,0 +1,16 @@
+FROM golang:1.25
+
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+
+WORKDIR /app
+
+RUN go install github.com/air-verse/air@v1.65.1
+
+COPY go.mod go.sum* ./
+RUN go mod download
+
+COPY . .
+
+EXPOSE 8080
+CMD ["air", "-c", ".air.toml"]

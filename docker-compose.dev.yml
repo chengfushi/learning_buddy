@@ -1,0 +1,47 @@
+# 本地开发覆盖：源码直接挂载，保存后自动热更新。
+# PostgreSQL、Redis、MinIO 仍使用 docker-compose.yml 中的宿主机连接。
+
+services:
+  backend:
+    image: learning-buddy-backend-dev:local
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    volumes:
+      - type: bind
+        source: ./backend
+        target: /app
+    command: ["air", "-c", ".air.toml"]
+
+  agent:
+    volumes:
+      - type: bind
+        source: ./agent
+        target: /src
+      # 避免 Uvicorn 扫描宿主机虚拟环境中的大量 Python 文件。
+      - type: tmpfs
+        target: /src/.venv
+    command:
+      - uvicorn
+      - main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /src
+
+  frontend:
+    volumes:
+      - type: bind
+        source: ./frontend/src
+        target: /app/src
+      - type: bind
+        source: ./frontend/index.html
+        target: /app/index.html
+      - type: bind
+        source: ./frontend/vite.config.ts
+        target: /app/vite.config.ts

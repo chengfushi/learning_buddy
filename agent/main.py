@@ -215,6 +215,4 @@ def do_quiz(req: QuizRequest) -> list:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(
-        "main:app", host="0.0.0.0", port=int(os.getenv("PORT", settings.port)), reload=False
-    )
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", settings.port)), reload=False)
