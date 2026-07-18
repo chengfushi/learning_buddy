@@ -1,6 +1,6 @@
 # 把 RAG 从“能跑”做到“能上线”：一套基于 PostgreSQL/pgvector 的生产化实践
 
-![RAG 生产化实践博客封面](./rag-production-cover.png)
+![RAG 生产化实践博客封面](./rag-production-cover-v2.png)
 
 > 摘要：一个真正可用的企业知识库，难点通常不在“调用一次 Embedding，再把 Top-K 塞给大模型”，而在数据质量、权限隔离、召回策略、失败降级和版本切换。本文复盘一套 RAG v2 的完整构造过程：从多格式文档解析，到混合召回、Rerank、父文档扩展，再到反馈闭环和影子索引灰度。
 >
