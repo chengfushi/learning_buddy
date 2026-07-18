@@ -8,6 +8,27 @@ interface Msg {
   citations?: Citation[];
   messageId?: number;
   feedback?: "up" | "down";
+  stageMs?: Record<string, number>;
+  degradedStages?: string[];
+}
+
+const stageLabels: Record<string, string> = {
+  analyze_query: "问题理解",
+  query_analysis: "问题理解",
+  embedding: "语义检索",
+  retrieve: "知识库召回",
+  rerank: "候选精排",
+  expand: "上下文扩展",
+};
+
+function stageLabel(stage: string): string {
+  return stageLabels[stage] ?? stage.replace(/_/g, " ");
+}
+
+function validStageTimings(stageMs?: Record<string, number>): [string, number][] {
+  return Object.entries(stageMs ?? {}).filter(
+    (entry) => Number.isFinite(entry[1]) && entry[1] >= 0,
+  );
 }
 
 function sessionStorageKey(materialId?: number): string {
@@ -91,7 +112,12 @@ export default function Companion({
           onDone: (done) => {
             setSessionId(done.session_id);
             globalThis.localStorage?.setItem(sessionStorageKey(materialId), done.session_id);
-            updateLastAssistant({ citations: done.citations, messageId: done.message_id });
+            updateLastAssistant({
+              citations: done.citations,
+              messageId: done.message_id,
+              stageMs: done.stage_ms,
+              degradedStages: done.degraded_stages,
+            });
           },
           onEnd: () => setBusy(false),
           onError: (message) => {
@@ -218,6 +244,25 @@ export default function Companion({
                       </button>
                     ))}
                   </div>
+                )}
+                {!!message.degradedStages?.length && (
+                  <div className="rag-degraded" role="status">
+                    本次检索使用了降级路径：
+                    {[...new Set(message.degradedStages)].map(stageLabel).join("、")}
+                  </div>
+                )}
+                {validStageTimings(message.stageMs).length > 0 && (
+                  <details className="rag-timings">
+                    <summary>检索耗时</summary>
+                    <dl>
+                      {validStageTimings(message.stageMs).map(([stage, duration]) => (
+                        <div key={stage}>
+                          <dt>{stageLabel(stage)}</dt>
+                          <dd>{duration} ms</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </details>
                 )}
                 {message.role === "assistant" && message.messageId && (
                   <div className="feedback-controls">

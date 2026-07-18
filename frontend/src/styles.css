@@ -337,6 +337,36 @@ textarea {
 .feedback-controls button.selected {
   background: #e8edff;
 }
+.rag-degraded {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-left: 3px solid #b7791f;
+  background: #fff8e6;
+  color: #7a4b00;
+  font-size: 12px;
+}
+.rag-timings {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.rag-timings summary {
+  cursor: pointer;
+}
+.rag-timings dl {
+  margin: 4px 0 0;
+}
+.rag-timings dl div {
+  display: flex;
+  gap: 8px;
+}
+.rag-timings dt {
+  min-width: 72px;
+}
+.rag-timings dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
 .upload-zone {
   display: block;
   padding: 18px;

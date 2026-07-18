@@ -3,7 +3,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, type Exercise, type StudyPlan } from "../api";
+import { api, type Citation, type Exercise, type StudyPlan } from "../api";
 import Companion from "./Companion";
 
 const plan: StudyPlan = {
@@ -176,7 +176,7 @@ describe("Companion", () => {
       if (!handlers) throw new Error("chat handlers unavailable");
       handlers.onToken("牛顿");
       handlers.onToken("第一定律");
-      handlers.onCitations?.([
+      const citations: Citation[] = [
         {
           team_id: 1,
           material_id: 31,
@@ -186,7 +186,15 @@ describe("Companion", () => {
           asset_id: 81,
         },
         { team_id: 1, material_id: 32, chapter: "", chunk_idx: 1 },
-      ]);
+      ];
+      handlers.onCitations?.(citations);
+      handlers.onDone?.({
+        session_id: "session-31",
+        message_id: 91,
+        citations,
+        stage_ms: { analyze_query: 120, retrieve: 80, rerank: 240, expand: Number.NaN },
+        degraded_stages: ["embedding", "rerank", "rerank"],
+      });
       handlers.onEnd();
       stream.resolve();
     });
@@ -195,6 +203,13 @@ describe("Companion", () => {
     fireEvent.click(screen.getByRole("button", { name: "资料#31·第 3 页" }));
     expect(onOpenMaterial).toHaveBeenCalledWith({ materialId: 31, pageNumber: 3, assetId: 81 });
     expect(screen.getByText("资料#32")).not.toBeNull();
+    expect(screen.getByRole("status").textContent).toBe(
+      "本次检索使用了降级路径：语义检索、候选精排",
+    );
+    expect(screen.getByText("问题理解").closest("div")?.textContent).toBe("问题理解120 ms");
+    expect(screen.getByText("知识库召回").closest("div")?.textContent).toBe("知识库召回80 ms");
+    expect(screen.getByText("候选精排").closest("div")?.textContent).toBe("候选精排240 ms");
+    expect(screen.queryByText("上下文扩展")).toBeNull();
     expect(screen.getByRole("button", { name: "发送" })).not.toBeNull();
     expect(input.disabled).toBe(false);
   });
