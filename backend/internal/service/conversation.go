@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
 
@@ -21,12 +22,17 @@ func NewConversationService(repos *repository.Repositories) *ConversationService
 }
 
 // NewSession 创建新会话，返回 session id（UUID）。
-func (s *ConversationService) NewSession(ctx context.Context, userID int64, title string) (string, error) {
+func (s *ConversationService) NewSession(
+	ctx context.Context,
+	userID int64,
+	title string,
+	materialID *int64,
+) (string, error) {
 	id := uuid.NewString()
 	t := title
-	sess := &model.AgentSession{ID: id, UserID: userID, Title: &t}
+	sess := &model.AgentSession{ID: id, UserID: userID, MaterialID: materialID, Title: &t}
 	if err := s.repos.DB.WithContext(ctx).Create(sess).Error; err != nil {
-		return "", err
+		return "", fmt.Errorf("create conversation session: %w", err)
 	}
 	return id, nil
 }
@@ -35,7 +41,7 @@ func (s *ConversationService) NewSession(ctx context.Context, userID int64, titl
 func (s *ConversationService) ListSessions(ctx context.Context, userID int64) ([]model.AgentSession, error) {
 	var items []model.AgentSession
 	if err := s.repos.DB.WithContext(ctx).Where("user_id = ?", userID).Order("created_at DESC").Find(&items).Error; err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list conversation sessions: %w", err)
 	}
 	return items, nil
 }
@@ -48,7 +54,7 @@ func (s *ConversationService) GetSession(ctx context.Context, sessionID string, 
 		Limit(1).
 		Find(&sess)
 	if result.Error != nil {
-		return nil, result.Error
+		return nil, fmt.Errorf("get conversation session: %w", result.Error)
 	}
 	if result.RowsAffected != 1 {
 		return nil, repository.ErrNotFound
@@ -63,9 +69,41 @@ func (s *ConversationService) Messages(ctx context.Context, sessionID string, us
 	}
 	var msgs []model.AgentMessage
 	if err := s.repos.DB.WithContext(ctx).Where("session_id = ?", sessionID).Order("created_at ASC").Find(&msgs).Error; err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list conversation messages: %w", err)
 	}
 	return msgs, nil
+}
+
+// MessagesForScope 仅在会话所属资料与本次请求完全一致时返回历史。
+// nil 表示全局会话；不一致统一返回 ErrNotFound，避免跨作用域污染上下文。
+func (s *ConversationService) MessagesForScope(
+	ctx context.Context,
+	sessionID string,
+	userID int64,
+	materialID *int64,
+) ([]model.AgentMessage, error) {
+	session, err := s.GetSession(ctx, sessionID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !sameMaterialScope(session.MaterialID, materialID) {
+		return nil, repository.ErrNotFound
+	}
+	var messages []model.AgentMessage
+	if err := s.repos.DB.WithContext(ctx).
+		Where("session_id = ?", sessionID).
+		Order("created_at ASC").
+		Find(&messages).Error; err != nil {
+		return nil, fmt.Errorf("list scoped conversation messages: %w", err)
+	}
+	return messages, nil
+}
+
+func sameMaterialScope(sessionMaterialID, requestMaterialID *int64) bool {
+	if sessionMaterialID == nil || requestMaterialID == nil {
+		return sessionMaterialID == nil && requestMaterialID == nil
+	}
+	return *sessionMaterialID == *requestMaterialID
 }
 
 // AppendMessage 写一条消息（user/assistant/system）。
@@ -76,7 +114,7 @@ func (s *ConversationService) AppendMessage(ctx context.Context, sessionID, role
 		m.Citations = b
 	}
 	if err := s.repos.DB.WithContext(ctx).Create(&m).Error; err != nil {
-		return nil, err
+		return nil, fmt.Errorf("append conversation message: %w", err)
 	}
 	return &m, nil
 }

@@ -1,7 +1,7 @@
 # AI Learning Companion · System Design Document
 
-> Version: v0.3 · Status: Design Draft (Revised) · Last Updated: 2026-07-11
-> Changelog: v0.4 centralizes material visibility and pgvector top-k in the Backend repository. Agent generation consumes only authorized chunks, while Parser uses least-privilege read/write credentials. It also completes class-code approval, the parse state machine, and embedding-dimension assertions.
+> Version: v0.6 · Status: Design Draft (Revised) · Last Updated: 2026-07-18
+> Changelog: v0.6 adds optional material scoping to conversations so global and material-specific histories cannot be mixed, while keeping the Backend repository as the only visibility authority.
 
 ---
 
@@ -342,6 +342,7 @@ CREATE INDEX idx_lr_user ON learning_records(user_id);
 CREATE TABLE agent_sessions (
   id          UUID PRIMARY KEY,
   user_id     BIGINT NOT NULL REFERENCES users(id),
+  material_id BIGINT REFERENCES materials(id) ON DELETE CASCADE, -- NULL=global; otherwise fixed material scope
   title       VARCHAR(200),
   created_at  TIMESTAMPTZ DEFAULT now()
 );
@@ -349,7 +350,7 @@ CREATE INDEX idx_as_user ON agent_sessions(user_id);
 
 CREATE TABLE agent_messages (
   id          BIGSERIAL PRIMARY KEY,
-  session_id  UUID REFERENCES agent_sessions(id),
+  session_id  UUID REFERENCES agent_sessions(id) ON DELETE CASCADE,
   role        VARCHAR(20),
   content     TEXT,
   citations   JSONB,   -- [{team_id, material_id, chapter, chunk_idx}]
@@ -361,7 +362,7 @@ CREATE TABLE exercises (
   id          BIGSERIAL PRIMARY KEY,
   user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   material_id BIGINT REFERENCES materials(id),
-  session_id  UUID REFERENCES agent_sessions(id),
+  session_id  UUID REFERENCES agent_sessions(id) ON DELETE SET NULL,
   question    TEXT NOT NULL,
   options     JSONB,
   answer_key  TEXT,

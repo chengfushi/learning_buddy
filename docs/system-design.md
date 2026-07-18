@@ -1,7 +1,7 @@
 # 智能学伴系统 · 系统设计文档
 
-> 版本：v0.5 · 状态：设计稿（修订） · 最后更新：2026-07-17
-> 变更：v0.5 增加 RAG v2 的对象存储解析管道、混合召回、Rerank、父资料扩展、反馈闭环和影子索引灰度；资料可见性仍由 Backend repository 作为唯一真源。
+> 版本：v0.6 · 状态：设计稿（修订） · 最后更新：2026-07-18
+> 变更：v0.6 为会话增加可选资料作用域，禁止全局会话与资料会话混用；资料可见性仍由 Backend repository 作为唯一真源。
 
 ---
 
@@ -340,6 +340,7 @@ CREATE INDEX idx_lr_user ON learning_records(user_id);
 CREATE TABLE agent_sessions (
   id          UUID PRIMARY KEY,
   user_id     BIGINT NOT NULL REFERENCES users(id),
+  material_id BIGINT REFERENCES materials(id) ON DELETE CASCADE, -- NULL=全局会话，否则固定资料作用域
   title       VARCHAR(200),
   created_at  TIMESTAMPTZ DEFAULT now()
 );
@@ -347,7 +348,7 @@ CREATE INDEX idx_as_user ON agent_sessions(user_id);
 
 CREATE TABLE agent_messages (
   id          BIGSERIAL PRIMARY KEY,
-  session_id  UUID REFERENCES agent_sessions(id),
+  session_id  UUID REFERENCES agent_sessions(id) ON DELETE CASCADE,
   role        VARCHAR(20),
   content     TEXT,
   citations   JSONB,   -- [{team_id, material_id, chapter, chunk_idx}]
@@ -359,7 +360,7 @@ CREATE TABLE exercises (
   id          BIGSERIAL PRIMARY KEY,
   user_id     BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   material_id BIGINT REFERENCES materials(id),
-  session_id  UUID REFERENCES agent_sessions(id),
+  session_id  UUID REFERENCES agent_sessions(id) ON DELETE SET NULL,
   question    TEXT NOT NULL,
   options     JSONB,
   answer_key  TEXT,

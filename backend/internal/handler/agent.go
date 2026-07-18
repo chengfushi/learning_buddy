@@ -38,26 +38,17 @@ func (h *Handlers) chat(c *gin.Context) {
 
 	ctx := c.Request.Context()
 	var err error
-	// 会话：复用或新建
+	// 已有会话必须与本次资料作用域一致；新会话在资料鉴权成功后再创建。
 	sessionID := req.SessionID
-	if sessionID == "" {
-		title := req.Question
-		if len(title) > 40 {
-			title = title[:40] + "…"
-		}
-		sessionID, err = h.Svc.Conversation.NewSession(ctx, uid, title)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	history := make([]service.ChatHistory, 0)
+	if sessionID != "" {
+		msgs, historyErr := h.Svc.Conversation.MessagesForScope(ctx, sessionID, uid, req.MaterialID)
+		if historyErr != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
 			return
 		}
+		history = h.Svc.Conversation.BuildHistory(msgs)
 	}
-	// 历史先完成所有权校验，再用于 Query Rewrite。
-	msgs, historyErr := h.Svc.Conversation.Messages(ctx, sessionID, uid)
-	if historyErr != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
-		return
-	}
-	history := h.Svc.Conversation.BuildHistory(msgs)
 	prepared, err := h.Svc.Agent.PrepareVisibleContext(
 		ctx, uid, req.Question, history, req.MaterialID,
 	)
@@ -68,6 +59,17 @@ func (h *Handlers) chat(c *gin.Context) {
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+	if sessionID == "" {
+		title := truncateRunes(req.Question, 40)
+		if len([]rune(req.Question)) > 40 {
+			title += "…"
+		}
+		sessionID, err = h.Svc.Conversation.NewSession(ctx, uid, title, req.MaterialID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 	observability.ObserveRAG(prepared.StageMS, prepared.DegradedStages, len(prepared.Chunks) == 0)
 

@@ -1,6 +1,6 @@
 # 数据库文档（learning_buddy）
 
-> 版本：v0.3 · 最后更新：2026-07-11
+> 版本：v0.4 · 最后更新：2026-07-18
 > 配套：系统设计 `docs/system-design.md` §8 · 工程规范 `docs/engineering-standards.md`
 > 关系库：**PostgreSQL 16 + pgvector**；缓存：**Redis 7**；文件：**MinIO/S3**
 
@@ -122,19 +122,20 @@
 |------|------|------|
 | `id` | UUID | PK |
 | `user_id` | BIGINT NOT NULL | FK → `users(id)` |
+| `material_id` | BIGINT | FK → `materials(id)` ON DELETE CASCADE；`NULL` 表示全局会话，否则固定在该资料作用域 |
 | `title` | VARCHAR(200) | 会话标题 |
 | `created_at` | TIMESTAMPTZ | DEFAULT now() |
 
 | agent_messages | 类型 | 说明 |
 |------|------|------|
 | `id` | BIGSERIAL | PK |
-| `session_id` | UUID | FK → `agent_sessions(id)` |
+| `session_id` | UUID | FK → `agent_sessions(id)` ON DELETE CASCADE |
 | `role` | VARCHAR(20) | `user` / `assistant` / `system` |
 | `content` | TEXT | 消息内容 |
 | `citations` | JSONB | `[{team_id, material_id, chapter, chunk_idx}]`（引用来源） |
 | `created_at` | TIMESTAMPTZ | DEFAULT now() |
 
-索引：`idx_as_user(user_id)`。
+索引：`idx_as_user(user_id)`、`idx_as_user_material_created(user_id, material_id, created_at DESC)`。
 
 ### 2.8 exercises / quiz_attempts（测评，Evaluator）
 
@@ -143,7 +144,7 @@
 | `id` | BIGSERIAL | PK |
 | `user_id` | BIGINT NOT NULL | FK → `users(id)`；题目所有者 |
 | `material_id` | BIGINT | FK → `materials(id)` |
-| `session_id` | UUID | FK → `agent_sessions(id)` |
+| `session_id` | UUID | FK → `agent_sessions(id)` ON DELETE SET NULL |
 | `question` | TEXT NOT NULL | 题目 |
 | `answer_key` | TEXT | 参考答案 |
 | `difficulty` | VARCHAR(20) | 难度 |
@@ -207,6 +208,7 @@ users ──< team_members >── teams ──< materials ──< material_chun
                            │
 users ──< learning_records >── materials
 users ──< agent_sessions ──< agent_messages
+materials ──< agent_sessions（可选资料作用域）
 users ──< quiz_attempts >── exercises ──< materials
 users ──< study_plans
 users ──< user_profiles (1:1)
