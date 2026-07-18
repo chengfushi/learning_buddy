@@ -161,6 +161,115 @@ describe("Reader", () => {
     expect(api.listNotes).toHaveBeenLastCalledWith(second.ID);
   });
 
+  it("ignores late material, note, asset, and source responses from the previous material", async () => {
+    const second = { ...material, ID: 32, Title: "动量守恒", Content: "p=mv" };
+    const secondNote = { ...note, ID: 42, MaterialID: second.ID, Content: "新资料笔记" };
+    const oldMaterial = deferred<{ material: Material }>();
+    const newMaterial = deferred<{ material: Material }>();
+    const oldNotes = deferred<{ notes: MaterialNote[] }>();
+    const newNotes = deferred<{ notes: MaterialNote[] }>();
+    const oldAssets = deferred<{ assets: MaterialAsset[] }>();
+    const newAssets = deferred<{ assets: MaterialAsset[] }>();
+    const oldSource = deferred<{ url: string; expires_in: number }>();
+    const newSource = deferred<{ url: string; expires_in: number }>();
+    vi.mocked(api.getMaterial).mockImplementation((id) =>
+      id === material.ID ? oldMaterial.promise : newMaterial.promise,
+    );
+    vi.mocked(api.listNotes).mockImplementation((id) =>
+      id === material.ID ? oldNotes.promise : newNotes.promise,
+    );
+    vi.mocked(api.listMaterialAssets).mockImplementation((id) =>
+      id === material.ID ? oldAssets.promise : newAssets.promise,
+    );
+    vi.mocked(api.getMaterialSourceURL).mockImplementation((id) =>
+      id === material.ID ? oldSource.promise : newSource.promise,
+    );
+    const { rerender } = render(
+      <Reader materialId={material.ID} onBack={vi.fn()} onAsk={vi.fn()} />,
+    );
+
+    rerender(<Reader materialId={second.ID} onBack={vi.fn()} onAsk={vi.fn()} />);
+    await act(async () => {
+      newMaterial.resolve({ material: second });
+      newNotes.resolve({ notes: [secondNote] });
+      newAssets.resolve({
+        assets: [
+          {
+            id: 82,
+            page_number: 2,
+            caption: "新资料图片",
+            ocr_text: null,
+            url: "https://assets.test/new.png",
+          },
+        ],
+      });
+      newSource.resolve({ url: "https://assets.test/new.pdf", expires_in: 600 });
+    });
+
+    expect(await screen.findByRole("heading", { name: second.Title })).not.toBeNull();
+    expect(screen.getByText(secondNote.Content)).not.toBeNull();
+    expect(screen.getByRole("img", { name: "新资料图片" })).not.toBeNull();
+    expect(screen.getByRole("link", { name: "下载原文件" }).getAttribute("href")).toBe(
+      "https://assets.test/new.pdf",
+    );
+
+    await act(async () => {
+      oldMaterial.resolve({ material });
+      oldNotes.resolve({ notes: [note] });
+      oldAssets.resolve({
+        assets: [
+          {
+            id: 81,
+            page_number: 1,
+            caption: "旧资料图片",
+            ocr_text: null,
+            url: "https://assets.test/old.png",
+          },
+        ],
+      });
+      oldSource.resolve({ url: "https://assets.test/old.pdf", expires_in: 600 });
+    });
+
+    expect(screen.getByRole("heading", { name: second.Title })).not.toBeNull();
+    expect(screen.queryByRole("heading", { name: material.Title })).toBeNull();
+    expect(screen.queryByText(note.Content)).toBeNull();
+    expect(screen.queryByRole("img", { name: "旧资料图片" })).toBeNull();
+    expect(screen.getByRole("link", { name: "下载原文件" }).getAttribute("href")).toBe(
+      "https://assets.test/new.pdf",
+    );
+  });
+
+  it("clears the note draft and ignores an old note completion after switching materials", async () => {
+    const second = { ...material, ID: 32, Title: "动量守恒" };
+    const createResult = deferred<{ note: MaterialNote }>();
+    vi.mocked(api.getMaterial).mockImplementation(async (id) => ({
+      material: id === material.ID ? material : second,
+    }));
+    vi.mocked(api.listNotes).mockImplementation(async (id) => ({
+      notes: id === material.ID ? [note] : [],
+    }));
+    vi.mocked(api.createNote).mockReturnValue(createResult.promise);
+    const { container, rerender } = render(
+      <Reader materialId={material.ID} onBack={vi.fn()} onAsk={vi.fn()} />,
+    );
+    await screen.findByRole("heading", { name: material.Title });
+    let editor = screen.getByPlaceholderText("写下你的理解或标注…") as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: "旧资料草稿" } });
+    fireEvent.submit(requireForm(container));
+    await waitFor(() => expect(api.createNote).toHaveBeenCalledWith(material.ID, "旧资料草稿"));
+
+    rerender(<Reader materialId={second.ID} onBack={vi.fn()} onAsk={vi.fn()} />);
+    await screen.findByRole("heading", { name: second.Title });
+    editor = screen.getByPlaceholderText("写下你的理解或标注…") as HTMLTextAreaElement;
+    expect(editor.value).toBe("");
+    fireEvent.change(editor, { target: { value: "新资料草稿" } });
+    await act(async () => createResult.resolve({ note }));
+
+    expect(editor.value).toBe("新资料草稿");
+    expect(api.getMaterial).toHaveBeenCalledTimes(2);
+    expect(api.getMaterial).toHaveBeenLastCalledWith(second.ID);
+  });
+
   it("scrolls and focuses the cited PDF page heading", async () => {
     vi.mocked(api.getMaterial).mockResolvedValue({
       material: { ...material, Content: "## 第 3 页\n\n惯性定律正文" },

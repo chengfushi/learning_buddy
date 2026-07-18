@@ -1,4 +1,12 @@
-import { Children, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  Children,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import ReactMarkdown from "react-markdown";
 import { api, type Material, type MaterialAsset, type MaterialNote } from "../api";
 import type { MaterialFocus } from "../material-navigation";
@@ -33,8 +41,15 @@ export default function Reader({
   const pageRefs = useRef(new Map<number, HTMLHeadingElement>());
   const assetRefs = useRef(new Map<number, HTMLElement>());
   const lastFocusedKey = useRef("");
+  const loadRequestRef = useRef(0);
+  const noteMutationRef = useRef(0);
+  const materialIdRef = useRef(materialId);
 
   const load = () => {
+    const targetMaterialId = materialId;
+    const loadRequest = ++loadRequestRef.current;
+    const isCurrentLoad = () =>
+      loadRequest === loadRequestRef.current && targetMaterialId === materialIdRef.current;
     setMaterial(null);
     setNotes([]);
     setAssets([]);
@@ -45,25 +60,54 @@ export default function Reader({
     setErr("");
     setNotesErr("");
     api
-      .getMaterial(materialId)
-      .then((r) => setMaterial(r.material))
-      .catch((e) => setErr(e instanceof Error ? e.message : "加载失败"))
-      .finally(() => setLoadingMaterial(false));
+      .getMaterial(targetMaterialId)
+      .then((r) => {
+        if (isCurrentLoad()) setMaterial(r.material);
+      })
+      .catch((e) => {
+        if (isCurrentLoad()) setErr(e instanceof Error ? e.message : "加载失败");
+      })
+      .finally(() => {
+        if (isCurrentLoad()) setLoadingMaterial(false);
+      });
     api
-      .listNotes(materialId)
-      .then((r) => setNotes(r.notes))
-      .catch((e) => setNotesErr(e instanceof Error ? e.message : "笔记加载失败"))
-      .finally(() => setLoadingNotes(false));
+      .listNotes(targetMaterialId)
+      .then((r) => {
+        if (isCurrentLoad()) setNotes(r.notes);
+      })
+      .catch((e) => {
+        if (isCurrentLoad()) setNotesErr(e instanceof Error ? e.message : "笔记加载失败");
+      })
+      .finally(() => {
+        if (isCurrentLoad()) setLoadingNotes(false);
+      });
     api
-      .listMaterialAssets(materialId)
-      .then((result) => setAssets(result.assets))
+      .listMaterialAssets(targetMaterialId)
+      .then((result) => {
+        if (isCurrentLoad()) setAssets(result.assets);
+      })
       .catch(() => undefined)
-      .finally(() => setAssetsLoaded(true));
+      .finally(() => {
+        if (isCurrentLoad()) setAssetsLoaded(true);
+      });
     api
-      .getMaterialSourceURL(materialId)
-      .then((result) => setSourceURL(result.url))
+      .getMaterialSourceURL(targetMaterialId)
+      .then((result) => {
+        if (isCurrentLoad()) setSourceURL(result.url);
+      })
       .catch(() => undefined);
   };
+  useLayoutEffect(() => {
+    materialIdRef.current = materialId;
+    loadRequestRef.current += 1;
+    noteMutationRef.current += 1;
+    setNote("");
+    return () => {
+      loadRequestRef.current += 1;
+      noteMutationRef.current += 1;
+    };
+  }, [materialId]);
+
   useEffect(() => {
     load();
   }, [materialId]);
@@ -90,13 +134,18 @@ export default function Reader({
 
   const addNote = async (e: FormEvent) => {
     e.preventDefault();
+    const targetMaterialId = materialId;
+    const noteMutation = ++noteMutationRef.current;
+    const isCurrentMutation = () =>
+      noteMutation === noteMutationRef.current && targetMaterialId === materialIdRef.current;
     setErr("");
     try {
-      await api.createNote(materialId, note);
+      await api.createNote(targetMaterialId, note);
+      if (!isCurrentMutation()) return;
       setNote("");
       load();
     } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : "笔记保存失败");
+      if (isCurrentMutation()) setErr(ex instanceof Error ? ex.message : "笔记保存失败");
     }
   };
 
