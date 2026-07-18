@@ -40,4 +40,4 @@ Backend 需要分别配置 MinIO 内部连接端点与浏览器可解析的 `MIN
 
 ## 重点告警
 
-至少关注 RAG 各阶段 P95/P99、降级次数、空召回、点踩率、解析失败率、MinIO 错误、PostgreSQL/HNSW 内存和模型 API 延迟。缓存只保存 Query Analysis、Embedding 与“候选内容哈希 + 模型版本”的 Rerank 结果，不缓存权限集合和最终答案。
+至少关注 RAG 各阶段 P95/P99、降级次数、空召回、点踩率、解析失败率、MinIO 错误、PostgreSQL/HNSW 内存和模型 API 延迟。缓存只保存 Query Analysis、Embedding 与“候选内容哈希 + 模型版本”的 Rerank 结果，不缓存权限集合和最终答案。Query Analysis 与 Embedding 使用独立缓存键；Embedding 超时、维度错误或包含非有限数时只触发当次词法降级，不写入缓存。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import re
 
 import httpx
@@ -66,6 +67,50 @@ async def _rewrite(question: str, history: list[ChatHistory]) -> tuple[str, bool
         return question, False, "local-fallback"
 
 
+def _valid_embedding(value: object) -> list[float] | None:
+    """拒绝维度错误、布尔值及非有限数，避免污染缓存和向量查询。"""
+    if not isinstance(value, list) or len(value) != settings.embedding_dim:
+        return None
+    embedding: list[float] = []
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, (int, float)):
+            return None
+        number = float(item)
+        if not math.isfinite(number):
+            return None
+        embedding.append(number)
+    return embedding
+
+
+async def _query_embedding(retrieval_query: str) -> list[float]:
+    """独立缓存有效向量；临时故障返回空向量但不写入缓存。"""
+    cloud_query = redact_for_cloud(retrieval_query)
+    key = cache_key(
+        "embedding",
+        {
+            "provider": settings.embedding_provider,
+            "model": settings.embedding_model,
+            "dimension": settings.embedding_dim,
+            "query": cloud_query,
+        },
+    )
+    cached = _valid_embedding(await get_json(key))
+    if cached is not None:
+        return cached
+    try:
+        raw_embedding = await asyncio.wait_for(
+            asyncio.to_thread(embed_text, cloud_query, settings.retriever_timeout_s),
+            timeout=max(0.001, settings.retriever_timeout_s),
+        )
+    except Exception:
+        return []
+    embedding = _valid_embedding(raw_embedding)
+    if embedding is None:
+        return []
+    await set_json(key, embedding, 3600)
+    return embedding
+
+
 async def analyze_query(req: QueryAnalysisRequest) -> QueryAnalysisResponse:
     """分析查询并返回改写、关键词和向量；缓存不包含任何权限结果。"""
     history_payload = [
@@ -75,7 +120,6 @@ async def analyze_query(req: QueryAnalysisRequest) -> QueryAnalysisResponse:
         "analysis",
         {
             "model": settings.llm_model,
-            "embedding": settings.embedding_model,
             "q": req.question,
             "h": history_payload,
         },
@@ -83,28 +127,24 @@ async def analyze_query(req: QueryAnalysisRequest) -> QueryAnalysisResponse:
     cached = await get_json(key)
     if isinstance(cached, dict):
         try:
-            return QueryAnalysisResponse.model_validate(cached)
+            analysis = QueryAnalysisResponse.model_validate(cached)
         except Exception:
-            pass
-    retrieval_query, applied, model = await _rewrite(req.question, req.history)
-    try:
-        embedding = await asyncio.wait_for(
-            asyncio.to_thread(
-                embed_text, redact_for_cloud(retrieval_query), settings.retriever_timeout_s
-            ),
-            timeout=max(0.001, settings.retriever_timeout_s),
+            analysis = None
+    else:
+        analysis = None
+    if analysis is None:
+        retrieval_query, applied, model = await _rewrite(req.question, req.history)
+        analysis = QueryAnalysisResponse(
+            retrieval_query=retrieval_query,
+            keywords=_keywords(retrieval_query),
+            rewrite_applied=applied,
+            model=model,
         )
-    except Exception:
-        embedding = []
-    result = QueryAnalysisResponse(
-        retrieval_query=retrieval_query,
-        keywords=_keywords(retrieval_query),
-        embedding=embedding,
-        rewrite_applied=applied,
-        model=model,
+        await set_json(key, analysis.model_dump(exclude={"embedding"}), 1800)
+    embedding = await _query_embedding(analysis.retrieval_query)
+    return analysis.model_copy(
+        update={"embedding": embedding},
     )
-    await set_json(key, result.model_dump(), 1800)
-    return result
 
 
 def _local_rerank(req: RerankRequest) -> RerankResponse:
