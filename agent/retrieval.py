@@ -8,6 +8,8 @@ import re
 
 import httpx
 
+__all__ = ["estimate_tokens", "httpx"]
+
 from cache import cache_key, get_json, set_json
 from db import settings
 from embed import embed_text

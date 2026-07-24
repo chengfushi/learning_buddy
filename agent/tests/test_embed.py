@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import httpx
 import pytest
 
@@ -20,7 +22,7 @@ def test_openai_embedder_uses_caller_timeout(monkeypatch: pytest.MonkeyPatch) ->
     captured: dict[str, float] = {}
 
     def fake_post(*_args: object, **kwargs: object) -> _EmbeddingResponse:
-        captured["timeout"] = float(kwargs["timeout"])
+        captured["timeout"] = float(cast(float, kwargs["timeout"]))
         return _EmbeddingResponse()
 
     monkeypatch.setattr(httpx, "post", fake_post)
@@ -34,7 +36,7 @@ def test_openai_embedder_defaults_to_parser_timeout(monkeypatch: pytest.MonkeyPa
     captured: dict[str, float] = {}
 
     def fake_post(*_args: object, **kwargs: object) -> _EmbeddingResponse:
-        captured["timeout"] = float(kwargs["timeout"])
+        captured["timeout"] = float(cast(float, kwargs["timeout"]))
         return _EmbeddingResponse()
 
     monkeypatch.setattr(httpx, "post", fake_post)

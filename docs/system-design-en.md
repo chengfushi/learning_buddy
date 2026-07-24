@@ -198,6 +198,7 @@ The system has three roles, with permissions and material ownership bounded by "
 | POST | `/api/auth/login` | Login | No |
 | POST | `/api/auth/register` | Register (default student, auto-create private team) | No |
 | POST | `/api/auth/refresh` | Refresh token (httpOnly Cookie) | Yes |
+| POST | `/api/auth/logout` | Revoke refresh token family and clear Cookie | Yes |
 | GET | `/api/teams` | My visible teams (private + joined + public) | Yes |
 | POST | `/api/teams` | Teacher creates study group team (returns `join_code`) | teacher |
 | POST | `/api/teams/:id/join` | Student requests to join via `join_code` (→ pending) | student |

@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterator
+from typing import cast
 
 import httpx
 import numpy as np
@@ -35,7 +37,7 @@ class LocalEmbedder(Embedder):
         self._dim = dim or settings.embedding_dim
         self._seed = seed
 
-    def _tokens(self, text: str):
+    def _tokens(self, text: str) -> Iterator[str]:
         text = (text or "").lower()
         yield from re.findall(r"[a-z0-9]+", text)
         cjk = re.findall(r"[一-鿿]", text)
@@ -75,7 +77,8 @@ class OpenAIEmbedder(Embedder):
             timeout=effective_timeout,
         )
         resp.raise_for_status()
-        return resp.json()["data"][0]["embedding"]
+        payload = cast(dict[str, list[dict[str, list[float]]]], resp.json())
+        return payload["data"][0]["embedding"]
 
 
 def get_embedder() -> Embedder:

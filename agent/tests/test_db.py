@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 
 import pytest
 
@@ -36,9 +37,9 @@ class _FakeConnection:
         return _FakeCursor(self._typmod)
 
 
-def _fake_get_conn(typmod: int | None):
+def _fake_get_conn(typmod: int | None) -> Callable[[], AbstractContextManager[_FakeConnection]]:
     @contextmanager
-    def get_conn():
+    def get_conn() -> Iterator[_FakeConnection]:
         yield _FakeConnection(typmod)
 
     return get_conn

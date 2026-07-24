@@ -16,6 +16,9 @@ type Config struct {
 	JWTSecret            string
 	AgentBaseURL         string
 	AgentSharedSecret    string
+	RedisAddr            string
+	ChatRateLimitPerMin  int
+	ChatDailyTokenLimit  int
 	ParseAlertWebhookURL string
 	EmbeddingDim         int
 	Addr                 string
@@ -73,6 +76,9 @@ func Load() *Config {
 		JWTSecret:            jwtSecret,
 		AgentBaseURL:         agentBaseURL,
 		AgentSharedSecret:    os.Getenv("AGENT_SHARED_SECRET"),
+		RedisAddr:            envOr("REDIS_ADDR", ""),
+		ChatRateLimitPerMin:  envInt("CHAT_RATE_LIMIT_PER_MIN", 20),
+		ChatDailyTokenLimit:  envInt("CHAT_DAILY_TOKEN_LIMIT", 100000),
 		ParseAlertWebhookURL: os.Getenv("PARSE_ALERT_WEBHOOK_URL"),
 		EmbeddingDim:         dim,
 		Addr:                 addr,

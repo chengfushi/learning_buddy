@@ -12,7 +12,8 @@ import json
 import os
 import re
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from typing import Any
 
 from fastapi import Depends, FastAPI, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +28,7 @@ from rag import parse, run_chat_resilient, run_plan, run_quiz
 from retrieval import analyze_query, rerank
 from schemas import (
     ChatRequest,
+    ChunkInput,
     EmbedRequest,
     EmbedResponse,
     ParseRequest,
@@ -51,18 +53,18 @@ async def startup() -> None:
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-def _sse(obj: dict) -> str:
+def _sse(obj: dict[str, Any]) -> str:
     return "data: " + json.dumps(obj, ensure_ascii=False) + "\n\n"
 
 
-def _tokenize(text: str):
+def _tokenize(text: str) -> Iterator[str]:
     parts = re.findall(r"[一-鿿]|[A-Za-z0-9]+|\s+|[^\s]", text or "")
     buf = ""
     for p in parts:
@@ -81,7 +83,7 @@ def _tokenize(text: str):
 
 
 @app.get("/health")
-def health() -> dict:
+def health() -> dict[str, str]:
     return {"status": "ok" if health_ok() else "db_down"}
 
 
@@ -92,7 +94,7 @@ def metrics() -> Response:
 
 
 @app.post("/parse", dependencies=[Depends(require_agent_token)])
-def do_parse(req: ParseRequest) -> dict:
+def do_parse(req: ParseRequest) -> dict[str, int | str]:
     return parse(
         req.material_id,
         req.parse_generation,
@@ -133,7 +135,7 @@ async def do_rerank(req: RerankRequest) -> RerankResponse:
     return result
 
 
-def _chunks(items) -> list[ChunkView]:
+def _chunks(items: list[ChunkInput]) -> list[ChunkView]:
     return [
         ChunkView(
             item.team_id,
@@ -203,12 +205,12 @@ async def do_chat(
 
 
 @app.post("/plan", dependencies=[Depends(require_agent_token)])
-def do_plan(req: PlanRequest) -> dict:
+def do_plan(req: PlanRequest) -> dict[str, Any]:
     return run_plan(req.goal, req.deadline, _chunks(req.chunks))
 
 
 @app.post("/quiz", dependencies=[Depends(require_agent_token)])
-def do_quiz(req: QuizRequest) -> list:
+def do_quiz(req: QuizRequest) -> list[dict[str, Any]]:
     return run_quiz(req.topic, req.count, _chunks(req.chunks))
 
 

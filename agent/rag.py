@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Any
 
 from pgvector import Vector
 from psycopg2.extras import Json
@@ -27,7 +28,7 @@ def _stale_parse_response(
     request_generation: int,
     current_generation: int,
     parse_status: str,
-) -> dict:
+) -> dict[str, int | str]:
     logger.info(
         "ignored stale material parse write",
         extra={
@@ -87,7 +88,7 @@ def parse(
     content: str,
     file_type: str,
     storage_key: str,
-) -> dict:
+) -> dict[str, int | str]:
     """执行 RAG v2 Parser，并仅在当前解析代次仍有效时原子替换影子索引。"""
     # 先做无锁预检，避免已知陈旧请求继续消耗远程 Embedding 配额；写入前仍会在锁内复检。
     with get_conn() as conn:
@@ -274,7 +275,9 @@ def parse(
     return {"material_id": material_id, "chunks": len(result.chunks), "status": "done"}
 
 
-def run_chat(question: str, chunks: list[ChunkView], history=None) -> tuple[str, list[dict]]:
+def run_chat(
+    question: str, chunks: list[ChunkView], history: Any = None
+) -> tuple[str, list[dict[str, Any]]]:
     evidence = _evidence_chunks(chunks)
     if not evidence:
         return NO_EVIDENCE_RESPONSE, []
@@ -287,7 +290,7 @@ async def run_chat_resilient(
     chunks: list[ChunkView],
     history: object = None,
     trace_id: str = "",
-) -> tuple[str, list[dict]]:
+) -> tuple[str, list[dict[str, Any]]]:
     """按 Tutor 独立预算生成；检索超时降级已由 Backend 在权限过滤后处理。"""
     evidence = _evidence_chunks(chunks)
     if not evidence:
@@ -325,7 +328,7 @@ def _evidence_chunks(chunks: list[ChunkView]) -> list[ChunkView]:
     return [chunk for chunk in chunks if chunk.content.strip()]
 
 
-def _citations(chunks: list[ChunkView]) -> list[dict]:
+def _citations(chunks: list[ChunkView]) -> list[dict[str, Any]]:
     return [
         {
             "team_id": c.team_id,
@@ -344,7 +347,7 @@ def _citations(chunks: list[ChunkView]) -> list[dict]:
     ]
 
 
-def run_plan(goal: str, deadline: str | None, chunks: list[ChunkView]) -> dict:
+def run_plan(goal: str, deadline: str | None, chunks: list[ChunkView]) -> dict[str, Any]:
     try:
         result = get_llm().plan(goal, deadline, chunks)
         return PlanResult.model_validate(result).model_dump()
@@ -353,7 +356,7 @@ def run_plan(goal: str, deadline: str | None, chunks: list[ChunkView]) -> dict:
         return MockLLM().plan(goal, deadline, chunks)
 
 
-def run_quiz(topic: str, count: int, chunks: list[ChunkView]) -> list[dict]:
+def run_quiz(topic: str, count: int, chunks: list[ChunkView]) -> list[dict[str, Any]]:
     try:
         result = get_llm().quiz(topic, count, chunks)
         validated = QuizResult.model_validate(result)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi.testclient import TestClient
@@ -28,7 +29,7 @@ TEST_SECRET = "contract-agent-secret"
 
 @pytest.fixture
 def contract() -> dict[str, object]:
-    return json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+    return cast(dict[str, object], json.loads(CONTRACT_PATH.read_text(encoding="utf-8")))
 
 
 @pytest.fixture
@@ -50,7 +51,7 @@ def test_contract_requests_match_pydantic_models(contract: dict[str, object]) ->
     for name, model in models.items():
         exchange = contract[name]
         assert isinstance(exchange, dict)
-        model.model_validate(exchange["request"])
+        model.model_validate(exchange["request"])  # type: ignore[attr-defined]
 
 
 def test_contract_matches_fastapi_responses(
@@ -121,8 +122,10 @@ def test_contract_matches_fastapi_responses(
     chat_response = chat_exchange["response"]
     assert isinstance(chat_response, dict)
 
-    async def fake_chat(*_args: object, **_kwargs: object) -> tuple[str, list[dict]]:
-        return chat_response["answer"], chat_response["citations"]
+    async def fake_chat(*_args: object, **_kwargs: object) -> tuple[str, list[dict[str, object]]]:
+        return str(chat_response["answer"]), cast(
+            list[dict[str, object]], chat_response["citations"]
+        )
 
     monkeypatch.setattr(main, "run_chat_resilient", fake_chat)
     response = client.post("/chat", json=chat_exchange["request"], headers=headers)

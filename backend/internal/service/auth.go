@@ -2,11 +2,15 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 
@@ -27,8 +31,9 @@ func NewAuthService(repos *repository.Repositories, cfg *config.Config) *AuthSer
 
 // Claims JWT 载荷。
 type Claims struct {
-	UserID int64  `json:"uid"`
-	Role   string `json:"role"`
+	UserID    int64  `json:"uid"`
+	Role      string `json:"role"`
+	TokenType string `json:"typ"`
 	jwt.RegisteredClaims
 }
 
@@ -92,11 +97,11 @@ func (s *AuthService) Login(ctx context.Context, email, password string) (*model
 	if err := bcrypt.CompareHashAndPassword([]byte(*u.PasswordHash), []byte(password)); err != nil {
 		return nil, "", "", errors.New("账号或密码错误")
 	}
-	access, err := s.sign(u.ID, u.Role, time.Hour*24)
+	access, err := s.signWithType(u.ID, u.Role, "access", 15*time.Minute)
 	if err != nil {
 		return nil, "", "", err
 	}
-	refresh, err := s.sign(u.ID, u.Role, time.Hour*24*7)
+	refresh, err := s.newRefreshToken(ctx, u.ID)
 	if err != nil {
 		return nil, "", "", err
 	}
@@ -104,24 +109,102 @@ func (s *AuthService) Login(ctx context.Context, email, password string) (*model
 }
 
 // Refresh 用 refresh token 换发 access token。
-func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (string, error) {
-	claims, err := s.parse(refreshToken)
-	if err != nil {
-		return "", errors.New("无效 refresh token")
+func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (string, string, error) {
+	if refreshToken == "" || s.repos == nil {
+		return "", "", errors.New("无效 refresh token")
 	}
-	return s.sign(claims.UserID, claims.Role, time.Hour*24)
+	now := time.Now()
+	old, err := s.repos.FindRefreshToken(ctx, hashRefreshToken(refreshToken))
+	if err != nil {
+		return "", "", errors.New("无效 refresh token")
+	}
+	newRefresh, replacement, err := generateRefreshToken(old.UserID, old.FamilyID)
+	if err != nil {
+		return "", "", err
+	}
+	if err := s.repos.RotateRefreshToken(ctx, old.TokenHash, now, replacement); err != nil {
+		if errors.Is(err, repository.ErrRefreshTokenReplay) {
+			return "", "", errors.New("refresh token replay detected")
+		}
+		return "", "", errors.New("无效 refresh token")
+	}
+	u, err := s.repos.GetUser(ctx, old.UserID)
+	if err != nil {
+		return "", "", errors.New("无效 refresh token")
+	}
+	access, err := s.signWithType(u.ID, u.Role, "access", 15*time.Minute)
+	if err != nil {
+		return "", "", err
+	}
+	return access, newRefresh, nil
+}
+
+// RevokeRefresh 撤销当前 refresh token 所属 token family。
+func (s *AuthService) RevokeRefresh(ctx context.Context, refreshToken string) error {
+	if s.repos == nil || refreshToken == "" {
+		return nil
+	}
+	token, err := s.repos.FindRefreshToken(ctx, hashRefreshToken(refreshToken))
+	if errors.Is(err, repository.ErrRefreshTokenNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return s.repos.RevokeRefreshFamily(ctx, token.FamilyID, time.Now())
+}
+
+func (s *AuthService) newRefreshToken(ctx context.Context, userID int64) (string, error) {
+	plain, token, err := generateRefreshToken(userID, uuid.NewString())
+	if err != nil {
+		return "", err
+	}
+	if err := s.repos.CreateRefreshToken(ctx, token); err != nil {
+		return "", err
+	}
+	return plain, nil
+}
+
+func generateRefreshToken(userID int64, familyID string) (string, *model.RefreshToken, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", nil, err
+	}
+	plain := hex.EncodeToString(buf)
+	return plain, &model.RefreshToken{
+		ID:        uuid.NewString(),
+		FamilyID:  familyID,
+		UserID:    userID,
+		TokenHash: hashRefreshToken(plain),
+		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+	}, nil
+}
+
+func hashRefreshToken(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }
 
 // VerifyToken 校验 access token，返回 claims。
 func (s *AuthService) VerifyToken(tokenStr string) (*Claims, error) {
-	return s.parse(tokenStr)
+	claims, err := s.parse(tokenStr)
+	if err != nil || claims.TokenType != "access" {
+		return nil, errors.New("invalid access token")
+	}
+	return claims, nil
 }
 
+// sign 保留给同包测试和旧调用点，默认生成 access token。
 func (s *AuthService) sign(userID int64, role string, ttl time.Duration) (string, error) {
+	return s.signWithType(userID, role, "access", ttl)
+}
+
+func (s *AuthService) signWithType(userID int64, role, tokenType string, ttl time.Duration) (string, error) {
 	now := time.Now()
 	claims := Claims{
-		UserID: userID,
-		Role:   role,
+		UserID:    userID,
+		Role:      role,
+		TokenType: tokenType,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   fmt.Sprintf("%d", userID),
 			IssuedAt:  jwt.NewNumericDate(now),

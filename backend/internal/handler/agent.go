@@ -31,6 +31,19 @@ type chatReq struct {
 // 安全：Backend repository 先检索出已授权 chunks，Agent 不接触可见性谓词。
 func (h *Handlers) chat(c *gin.Context) {
 	uid := middleware.CtxUserID(c)
+	allowed, _ := h.Svc.RateLimiter.AllowChat(c.Request.Context(), uid)
+	if !allowed {
+		c.Header("Retry-After", "60")
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "问答请求过于频繁，请稍后再试"})
+		return
+	}
+	if h.Svc.Cfg.ChatDailyTokenLimit > 0 {
+		used, err := h.Svc.Repos.DailyTokenUsage(c.Request.Context(), uid, "chat")
+		if err == nil && used >= h.Svc.Cfg.ChatDailyTokenLimit {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "已达到今日问答额度"})
+			return
+		}
+	}
 
 	var req chatReq
 	if err := c.ShouldBindJSON(&req); err != nil || req.Question == "" {

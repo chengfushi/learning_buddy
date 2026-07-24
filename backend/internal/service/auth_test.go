@@ -76,6 +76,9 @@ func TestAuthRegisterLoginAndRefreshLifecycle(t *testing.T) {
 	assert.NotEmpty(t, access)
 	assert.NotEmpty(t, refresh)
 	assert.NotEqual(t, access, refresh)
+	stored, err := svcs.Repos.FindRefreshToken(ctx, hashRefreshToken(refresh))
+	require.NoError(t, err)
+	assert.NotEqual(t, refresh, stored.TokenHash, "数据库不得保存 refresh token 明文")
 
 	accessClaims, err := svcs.Auth.VerifyToken(access)
 	require.NoError(t, err)
@@ -83,12 +86,18 @@ func TestAuthRegisterLoginAndRefreshLifecycle(t *testing.T) {
 	assert.Equal(t, "student", accessClaims.Role)
 	assert.Equal(t, strconv.FormatInt(user.ID, 10), accessClaims.Subject)
 
-	refreshedAccess, err := svcs.Auth.Refresh(ctx, refresh)
+	refreshedAccess, rotatedRefresh, err := svcs.Auth.Refresh(ctx, refresh)
 	require.NoError(t, err)
+	assert.NotEmpty(t, rotatedRefresh)
+	assert.NotEqual(t, refresh, rotatedRefresh)
 	refreshedClaims, err := svcs.Auth.VerifyToken(refreshedAccess)
 	require.NoError(t, err)
 	assert.Equal(t, user.ID, refreshedClaims.UserID)
 	assert.Equal(t, user.Role, refreshedClaims.Role)
+	_, _, replayErr := svcs.Auth.Refresh(ctx, refresh)
+	assert.EqualError(t, replayErr, "refresh token replay detected")
+	_, _, familyErr := svcs.Auth.Refresh(ctx, rotatedRefresh)
+	assert.EqualError(t, familyErr, "无效 refresh token")
 }
 
 func TestAuthLoginRejectsUnknownInvalidAndPasswordlessAccounts(t *testing.T) {
@@ -167,8 +176,9 @@ func TestAuthTokenValidationRejectsInvalidTokens(t *testing.T) {
 	for _, token := range []string{"", "not-a-jwt", "a.b.c"} {
 		_, err = auth.VerifyToken(token)
 		assert.Error(t, err)
-		refreshed, refreshErr := auth.Refresh(context.Background(), token)
+		refreshed, rotated, refreshErr := auth.Refresh(context.Background(), token)
 		assert.EqualError(t, refreshErr, "无效 refresh token")
 		assert.Empty(t, refreshed)
+		assert.Empty(t, rotated)
 	}
 }

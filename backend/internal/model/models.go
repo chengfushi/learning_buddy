@@ -19,6 +19,21 @@ type User struct {
 
 func (User) TableName() string { return "users" }
 
+// RefreshToken 是一次性刷新凭证。数据库只保存 SHA-256 哈希，明文只存在于 httpOnly Cookie。
+type RefreshToken struct {
+	ID             string     `gorm:"primaryKey;column:id"`
+	FamilyID       string     `gorm:"column:family_id;index"`
+	UserID         int64      `gorm:"column:user_id;index"`
+	TokenHash      string     `gorm:"column:token_hash;uniqueIndex"`
+	ExpiresAt      time.Time  `gorm:"column:expires_at;index"`
+	UsedAt         *time.Time `gorm:"column:used_at"`
+	RevokedAt      *time.Time `gorm:"column:revoked_at"`
+	ReplacedByHash *string    `gorm:"column:replaced_by_hash"`
+	CreatedAt      time.Time  `gorm:"column:created_at"`
+}
+
+func (RefreshToken) TableName() string { return "refresh_tokens" }
+
 // Team 团队 / 知识库（F2）。
 type Team struct {
 	ID        int64     `gorm:"primaryKey;column:id"`

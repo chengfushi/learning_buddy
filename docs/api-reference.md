@@ -28,8 +28,8 @@
 Authorization: Bearer {access_token}
 ```
 
-- **access_token** 有效期 24 小时，由登录/注册接口返回。
-- **refresh_token** 有效期 7 天，通过 `/api/auth/refresh` 换发新 access_token。
+- **access_token** 有效期 15 分钟，由登录/注册接口返回，仅保存在前端内存。
+- **refresh token** 有效期 7 天，仅通过 `HttpOnly; Secure; SameSite=Lax` Cookie 传输；服务端只保存 SHA-256 哈希，每次刷新都会轮换。
 - 注册时自动创建学生私有 team（同一事务，保证原子性）。
 - JWT 载荷：`{uid, role, sub, iat, exp}`，签名算法 HS256。
 
@@ -99,8 +99,7 @@ Authorization: Bearer {access_token}
     "subscription": "free",
     "created_at": "2026-07-12T10:00:00Z"
   },
-  "access_token": "eyJhbGciOiJIUzI1NiIs...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIs..."
+  "access_token": "eyJhbGciOiJIUzI1NiIs..."
 }
 ```
 
@@ -142,8 +141,7 @@ Authorization: Bearer {access_token}
     "subscription": "free",
     "created_at": "2026-07-12T10:00:00Z"
   },
-  "access_token": "eyJhbGciOiJIUzI1NiIs...",
-  "refresh_token": "eyJhbGciOiJIUzI1NiIs..."
+  "access_token": "eyJhbGciOiJIUzI1NiIs..."
 }
 ```
 
@@ -158,17 +156,13 @@ Authorization: Bearer {access_token}
 
 ### POST /api/auth/refresh
 
-用 refresh_token 换发新的 access_token。
+使用登录时设置的 refresh Cookie 换发新的 access_token，并同时轮换 Cookie。
 
 **鉴权**：否
 
 **幂等**：否（每次生成新 token）
 
-**Request Body（JSON）**
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `refresh_token` | string | ✅ | 登录时返回的 refresh_token |
+**Request Body**：无。浏览器必须携带登录时设置的 Cookie。
 
 **Response**
 
@@ -184,8 +178,11 @@ Authorization: Bearer {access_token}
 
 | HTTP | 说明 |
 |------|------|
-| 400 | 缺少 refresh_token |
-| 401 | refresh_token 无效或已过期 |
+| 401 | refresh Cookie 缺失、无效、过期、已撤销或被重放 |
+
+### POST /api/auth/logout
+
+撤销当前 refresh token family 并清除 Cookie。无请求体，成功返回 `204 No Content`。
 
 ---
 

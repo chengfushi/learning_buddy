@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any, cast
 
 import httpx
 
@@ -46,13 +47,13 @@ class ChunkView:
 
 
 class LLM:
-    def chat(self, question: str, chunks: list[ChunkView], history=None) -> str:
+    def chat(self, question: str, chunks: list[ChunkView], history: Any = None) -> str:
         raise NotImplementedError
 
-    def plan(self, goal: str, deadline: str | None, chunks: list[ChunkView]) -> dict:
+    def plan(self, goal: str, deadline: str | None, chunks: list[ChunkView]) -> dict[str, Any]:
         raise NotImplementedError
 
-    def quiz(self, topic: str, count: int, chunks: list[ChunkView]) -> list[dict]:
+    def quiz(self, topic: str, count: int, chunks: list[ChunkView]) -> list[dict[str, Any]]:
         raise NotImplementedError
 
 
@@ -67,7 +68,7 @@ def _first_sentence(text: str, max_len: int = 120) -> str:
 class MockLLM(LLM):
     """确定性、可复现的 mock 生成器：基于召回片段做抽取式组织，不调用外部模型。"""
 
-    def chat(self, question: str, chunks: list[ChunkView], history=None) -> str:
+    def chat(self, question: str, chunks: list[ChunkView], history: Any = None) -> str:
         if not chunks:
             return NO_EVIDENCE_RESPONSE
         lines = [f"关于「{question}」，根据团队知识库中的相关资料，整理如下：", ""]
@@ -77,7 +78,7 @@ class MockLLM(LLM):
         lines += ["", "以上回答均来自你有权访问的团队资料，可点击引用定位原文。"]
         return "\n".join(lines)
 
-    def plan(self, goal: str, deadline: str | None, chunks: list[ChunkView]) -> dict:
+    def plan(self, goal: str, deadline: str | None, chunks: list[ChunkView]) -> dict[str, Any]:
         steps = ["预习核心概念", "精读资料并做标注", "完成配套例题", "整理笔记与错题", "自测回顾"]
         days = 7
         items = []
@@ -91,7 +92,7 @@ class MockLLM(LLM):
             "items": items,
         }
 
-    def quiz(self, topic: str, count: int, chunks: list[ChunkView]) -> list[dict]:
+    def quiz(self, topic: str, count: int, chunks: list[ChunkView]) -> list[dict[str, Any]]:
         count = max(1, min(count or 3, 10))
         corpus = [c.content for c in chunks] or [topic]
         keywords: list[str] = []
@@ -100,7 +101,7 @@ class MockLLM(LLM):
                 keywords.append(kw)
         distractors = [k for k in dict.fromkeys(keywords) if k != topic][:12] or ["A", "B", "C"]
 
-        items: list[dict] = []
+        items: list[dict[str, Any]] = []
         for i in range(count):
             text = corpus[i % len(corpus)]
             sent = _first_sentence(text, 80)
@@ -137,9 +138,10 @@ class OpenAILLM(LLM):
             timeout=settings.tutor_timeout_s,
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        payload = cast(dict[str, Any], resp.json())
+        return str(payload["choices"][0]["message"]["content"])
 
-    def chat(self, question: str, chunks: list[ChunkView], history=None) -> str:
+    def chat(self, question: str, chunks: list[ChunkView], history: Any = None) -> str:
         ctx = "\n\n".join(
             f"[资料{c.material_id}/片段{c.chunk_id or c.chunk_idx}] "
             f"{c.title or c.chapter or '资料'}\n{c.content}"
@@ -151,7 +153,7 @@ class OpenAILLM(LLM):
             f"资料：\n{ctx}\n\n问题：{question}",
         )
 
-    def plan(self, goal: str, deadline: str | None, chunks: list[ChunkView]) -> dict:
+    def plan(self, goal: str, deadline: str | None, chunks: list[ChunkView]) -> dict[str, Any]:
         ctx = "\n".join(_first_sentence(c.content) for c in chunks[:5])
         text = self._complete(
             "你是学习计划助手，输出 JSON：{title,goal,items:[{date,task,done}]}。",
@@ -159,9 +161,9 @@ class OpenAILLM(LLM):
         )
         import json
 
-        return json.loads(text)
+        return cast(dict[str, Any], json.loads(text))
 
-    def quiz(self, topic: str, count: int, chunks: list[ChunkView]) -> list[dict]:
+    def quiz(self, topic: str, count: int, chunks: list[ChunkView]) -> list[dict[str, Any]]:
         ctx = "\n".join(_first_sentence(c.content) for c in chunks[:5])
         text = self._complete(
             "你是出题助手，输出 JSON 数组：[{question,options,answer_key,difficulty}]。",
@@ -169,7 +171,7 @@ class OpenAILLM(LLM):
         )
         import json
 
-        return json.loads(text)
+        return cast(list[dict[str, Any]], json.loads(text))
 
 
 def get_llm() -> LLM:

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -34,7 +35,8 @@ func (h *Handlers) register(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "注册成功但登录失败"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"user": publicUser(u), "access_token": access, "refresh_token": refresh})
+	setRefreshCookie(c, refresh)
+	c.JSON(http.StatusOK, gin.H{"user": publicUser(u), "access_token": access})
 }
 
 type loginReq struct {
@@ -53,25 +55,39 @@ func (h *Handlers) login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"user": publicUser(u), "access_token": access, "refresh_token": refresh})
-}
-
-type refreshReq struct {
-	RefreshToken string `json:"refresh_token"`
+	setRefreshCookie(c, refresh)
+	c.JSON(http.StatusOK, gin.H{"user": publicUser(u), "access_token": access})
 }
 
 func (h *Handlers) refresh(c *gin.Context) {
-	var req refreshReq
-	if err := c.ShouldBindJSON(&req); err != nil || req.RefreshToken == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少 refresh_token"})
+	refreshToken, err := c.Cookie(refreshCookieName)
+	if err != nil || refreshToken == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "缺少 refresh cookie"})
 		return
 	}
-	access, err := h.Svc.Auth.Refresh(c.Request.Context(), req.RefreshToken)
+	access, replacement, err := h.Svc.Auth.Refresh(c.Request.Context(), refreshToken)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
+	setRefreshCookie(c, replacement)
 	c.JSON(http.StatusOK, gin.H{"access_token": access})
+}
+
+func (h *Handlers) logout(c *gin.Context) {
+	if token, err := c.Cookie(refreshCookieName); err == nil {
+		_ = h.Svc.Auth.RevokeRefresh(c.Request.Context(), token)
+	}
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(refreshCookieName, "", -1, "/api/auth", "", true, true)
+	c.Status(http.StatusNoContent)
+}
+
+const refreshCookieName = "lb_refresh"
+
+func setRefreshCookie(c *gin.Context, token string) {
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(refreshCookieName, token, int((7 * 24 * time.Hour).Seconds()), "/api/auth", "", true, true)
 }
 
 func (h *Handlers) me(c *gin.Context) {

@@ -21,6 +21,7 @@ type Services struct {
 	Agent        *AgentService
 	Cfg          *config.Config
 	Objects      *objectstorage.ObjectStore
+	RateLimiter  *RateLimiter
 }
 
 func New(repos *repository.Repositories, cfg *config.Config) *Services {
@@ -39,5 +40,6 @@ func New(repos *repository.Repositories, cfg *config.Config) *Services {
 		Agent:        agent,
 		Cfg:          cfg,
 		Objects:      objects,
+		RateLimiter:  NewRateLimiter(cfg),
 	}
 }

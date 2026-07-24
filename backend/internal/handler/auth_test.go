@@ -19,6 +19,7 @@ import (
 	"gorm.io/gorm"
 
 	"learning_buddy/backend/internal/config"
+	"learning_buddy/backend/internal/model"
 	"learning_buddy/backend/internal/repository"
 	"learning_buddy/backend/internal/service"
 )
@@ -55,7 +56,9 @@ func TestAuthHTTPContract(t *testing.T) {
 	require.Equal(t, http.StatusOK, registerResp.Code)
 	registerPayload := decodeJSONObject(t, registerResp.Body.Bytes())
 	registerAccess := requireStringField(t, registerPayload, "access_token")
-	registerRefresh := requireStringField(t, registerPayload, "refresh_token")
+	assert.NotContains(t, registerPayload, "refresh_token")
+	assert.Contains(t, registerResp.Header().Get("Set-Cookie"), "lb_refresh=")
+	assert.Contains(t, registerResp.Header().Get("Set-Cookie"), "HttpOnly")
 	assertPublicUserPayload(t, registerResp.Body.Bytes(), registerPayload, email)
 
 	t.Run("register rejects duplicate account", func(t *testing.T) {
@@ -82,24 +85,31 @@ func TestAuthHTTPContract(t *testing.T) {
 	require.Equal(t, http.StatusOK, loginResp.Code)
 	loginPayload := decodeJSONObject(t, loginResp.Body.Bytes())
 	loginAccess := requireStringField(t, loginPayload, "access_token")
-	assert.NotEmpty(t, requireStringField(t, loginPayload, "refresh_token"))
+	assert.NotContains(t, loginPayload, "refresh_token")
+	assert.Contains(t, loginResp.Header().Get("Set-Cookie"), "lb_refresh=")
 	assertPublicUserPayload(t, loginResp.Body.Bytes(), loginPayload, email)
 
 	t.Run("refresh rejects missing token", func(t *testing.T) {
 		resp := performRequest(t, router, http.MethodPost, "/api/auth/refresh", `{}`, "")
-		assert.Equal(t, http.StatusBadRequest, resp.Code)
-		assertJSONField(t, resp.Body.Bytes(), "error", "缺少 refresh_token")
+		assert.Equal(t, http.StatusUnauthorized, resp.Code)
+		assertJSONField(t, resp.Body.Bytes(), "error", "缺少 refresh cookie")
 	})
 
 	t.Run("refresh rejects invalid token", func(t *testing.T) {
-		resp := performRequest(t, router, http.MethodPost, "/api/auth/refresh", `{"refresh_token":"invalid"}`, "")
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", nil)
+		req.AddCookie(&http.Cookie{Name: "lb_refresh", Value: "invalid"})
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
 		assert.Equal(t, http.StatusUnauthorized, resp.Code)
 		assertJSONField(t, resp.Body.Bytes(), "error", "无效 refresh token")
 	})
 
 	t.Run("refresh returns a verifiable access token", func(t *testing.T) {
-		body := `{"refresh_token":"` + registerRefresh + `"}`
-		resp := performRequest(t, router, http.MethodPost, "/api/auth/refresh", body, "")
+		cookie := loginResp.Header().Get("Set-Cookie")
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/refresh", nil)
+		req.Header.Set("Cookie", cookie[:strings.Index(cookie, ";")])
+		resp := httptest.NewRecorder()
+		router.ServeHTTP(resp, req)
 		require.Equal(t, http.StatusOK, resp.Code)
 		payload := decodeJSONObject(t, resp.Body.Bytes())
 		assert.NotEmpty(t, requireStringField(t, payload, "access_token"))
@@ -143,6 +153,7 @@ func newTestRouterWithServices(t *testing.T) (*gin.Engine, *service.Services) {
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&model.RefreshToken{}))
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
@@ -214,8 +225,9 @@ func assertPublicUserPayload(t *testing.T, raw []byte, payload map[string]any, w
 func signHandlerToken(t *testing.T, secret string, userID int64, role string) string {
 	t.Helper()
 	claims := service.Claims{
-		UserID: userID,
-		Role:   role,
+		UserID:    userID,
+		Role:      role,
+		TokenType: "access",
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 		},

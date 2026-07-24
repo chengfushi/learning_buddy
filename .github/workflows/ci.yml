@@ -79,6 +79,7 @@ jobs:
         working-directory: agent
         run: |
           ruff check .
+          python -m mypy --strict .
           python -m pytest tests/ -v --cov=. --cov-fail-under=70 --cov-report=term-missing --cov-report=xml:coverage.xml
 
       - name: Install Frontend dependencies
