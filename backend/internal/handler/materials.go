@@ -253,7 +253,7 @@ func (h *Handlers) updateMaterial(c *gin.Context) {
 	}
 	m, err := h.Svc.Materials.Update(c.Request.Context(), uid, role, id, body.Title, body.Content, body.Shared)
 	if err != nil {
-		if errors.Is(err, middleware.ErrForbidden) {
+		if errors.Is(err, middleware.ErrForbidden) || errors.Is(err, service.ErrForbidden) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "无权修改该资料"})
 			return
 		}
@@ -272,7 +272,7 @@ func (h *Handlers) deleteMaterial(c *gin.Context) {
 		return
 	}
 	if err := h.Svc.Materials.Delete(c.Request.Context(), uid, role, id); err != nil {
-		if errors.Is(err, middleware.ErrForbidden) {
+		if errors.Is(err, middleware.ErrForbidden) || errors.Is(err, service.ErrForbidden) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "无权删除该资料"})
 			return
 		}

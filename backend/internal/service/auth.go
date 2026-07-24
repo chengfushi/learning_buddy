@@ -88,7 +88,8 @@ func (s *AuthService) Register(ctx context.Context, email, password, displayName
 // Login 校验密码并返回 access / refresh 令牌。
 func (s *AuthService) Login(ctx context.Context, email, password string) (*model.User, string, string, error) {
 	var u model.User
-	if err := s.repos.DB.WithContext(ctx).First(&u, "email = ?", email).Error; err != nil {
+	result := s.repos.DB.WithContext(ctx).Where("email = ?", email).Limit(1).Find(&u)
+	if result.Error != nil || result.RowsAffected == 0 {
 		return nil, "", "", errors.New("账号或密码错误")
 	}
 	if u.PasswordHash == nil {

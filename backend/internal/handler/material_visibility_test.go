@@ -64,6 +64,24 @@ func TestMaterialReadAndNotesRequireRepositoryVisibility(t *testing.T) {
 		assert.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
 	})
 
+	t.Run("non-owner cannot update or delete teacher material", func(t *testing.T) {
+		updateResp := performRequest(
+			t, router, http.MethodPut, fmt.Sprintf("/api/materials/%d", sharedID),
+			`{"title":"越权修改"}`, member.Token,
+		)
+		assert.Equal(t, http.StatusForbidden, updateResp.Code, updateResp.Body.String())
+
+		deleteResp := performRequest(
+			t, router, http.MethodDelete, fmt.Sprintf("/api/materials/%d", sharedID), "", member.Token,
+		)
+		assert.Equal(t, http.StatusForbidden, deleteResp.Code, deleteResp.Body.String())
+
+		outsiderDelete := performRequest(
+			t, router, http.MethodDelete, fmt.Sprintf("/api/materials/%d", sharedID), "", outsider.Token,
+		)
+		assert.Equal(t, http.StatusForbidden, outsiderDelete.Code, outsiderDelete.Body.String())
+	})
+
 	t.Run("nonmember team view returns no materials", func(t *testing.T) {
 		resp := performRequest(t, router, http.MethodGet, fmt.Sprintf("/api/teams/%d/materials", teamID), "", outsider.Token)
 		require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())

@@ -2,9 +2,7 @@ package repository
 
 import (
 	"context"
-	"errors"
-
-	"gorm.io/gorm"
+	"fmt"
 
 	"learning_buddy/backend/internal/model"
 )
@@ -12,11 +10,12 @@ import (
 // GetTeam 按 ID 取团队。
 func (r *Repositories) GetTeam(ctx context.Context, id int64) (*model.Team, error) {
 	var t model.Team
-	if err := r.DB.WithContext(ctx).First(&t, "id = ?", id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
+	result := r.DB.WithContext(ctx).Where("id = ?", id).Limit(1).Find(&t)
+	if result.Error != nil {
+		return nil, fmt.Errorf("get team: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return nil, ErrNotFound
 	}
 	return &t, nil
 }
