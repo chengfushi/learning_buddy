@@ -6,13 +6,12 @@ import asyncio
 import math
 import re
 
-import httpx
-
-__all__ = ["estimate_tokens", "httpx"]
+__all__ = ["estimate_tokens"]
 
 from cache import cache_key, get_json, set_json
 from db import settings
 from embed import embed_text
+from http_client import post_async
 from pipeline import estimate_tokens, redact_for_cloud
 from schemas import (
     ChatHistory,
@@ -62,13 +61,12 @@ async def _rewrite(question: str, history: list[ChatHistory]) -> tuple[str, bool
     )
     messages.append({"role": "user", "content": redact_for_cloud(question)})
     try:
-        async with httpx.AsyncClient(timeout=settings.query_rewrite_timeout_s) as http:
-            response = await http.post(
-                f"{settings.llm_base_url.rstrip('/')}/chat/completions",
-                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-                json={"model": settings.llm_model, "messages": messages, "temperature": 0},
-            )
-        response.raise_for_status()
+        response = await post_async(
+            f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+            json={"model": settings.llm_model, "messages": messages, "temperature": 0},
+            timeout=settings.query_rewrite_timeout_s,
+        )
         rewritten = str(response.json()["choices"][0]["message"]["content"]).strip()
         return (
             (rewritten or question)[:1000],
@@ -257,22 +255,21 @@ async def rerank(req: RerankRequest) -> RerankResponse:
         except Exception:
             pass
     try:
-        async with httpx.AsyncClient(timeout=settings.rerank_timeout_s) as http:
-            response = await http.post(
-                settings.rerank_base_url,
-                headers={"Authorization": f"Bearer {api_key}"},
-                json={
-                    "model": settings.rerank_model,
-                    "query": redact_for_cloud(req.query),
-                    "documents": [
-                        _truncate_rerank_document(redact_for_cloud(item.content))
-                        for item in req.candidates
-                    ],
-                    "top_n": req.top_n,
-                    "instruct": "Given a technical question, retrieve passages that directly answer it.",
-                },
-            )
-        response.raise_for_status()
+        response = await post_async(
+            settings.rerank_base_url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={
+                "model": settings.rerank_model,
+                "query": redact_for_cloud(req.query),
+                "documents": [
+                    _truncate_rerank_document(redact_for_cloud(item.content))
+                    for item in req.candidates
+                ],
+                "top_n": req.top_n,
+                "instruct": "Given a technical question, retrieve passages that directly answer it.",
+            },
+            timeout=settings.rerank_timeout_s,
+        )
         payload = response.json()
         raw_items = payload.get("results") or payload.get("output", {}).get("results") or []
         items = _remote_rerank_items(req, raw_items)

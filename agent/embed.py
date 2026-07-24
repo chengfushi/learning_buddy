@@ -16,10 +16,10 @@ import re
 from collections.abc import Iterator
 from typing import cast
 
-import httpx
 import numpy as np
 
 from db import settings
+from http_client import post_sync
 
 
 class Embedder:
@@ -66,7 +66,7 @@ class OpenAIEmbedder(Embedder):
         effective_timeout = (
             timeout_s if timeout_s is not None else settings.parser_embedding_timeout_s
         )
-        resp = httpx.post(
+        resp = post_sync(
             f"{settings.embedding_base_url.rstrip('/')}/embeddings",
             headers={"Authorization": f"Bearer {settings.embedding_api_key}"},
             json={

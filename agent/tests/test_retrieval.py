@@ -174,20 +174,6 @@ class _RerankResponse:
         return self.payload
 
 
-class _RerankClient:
-    def __init__(self, payload: dict[str, object]) -> None:
-        self.payload = payload
-
-    async def __aenter__(self) -> _RerankClient:
-        return self
-
-    async def __aexit__(self, *_args: object) -> None:
-        return None
-
-    async def post(self, *_args: object, **_kwargs: object) -> _RerankResponse:
-        return _RerankResponse(self.payload)
-
-
 def _rerank_request() -> RerankRequest:
     return RerankRequest(
         query="MQTT 如何配置？",
@@ -230,11 +216,11 @@ async def test_invalid_remote_rerank_results_fall_back_to_rrf(
     monkeypatch.setattr(retrieval, "set_json", set_json)
     monkeypatch.setattr(settings, "rerank_api_key", "test-key")
     monkeypatch.setattr(settings, "rerank_base_url", "https://rerank.invalid")
-    monkeypatch.setattr(
-        retrieval.httpx,
-        "AsyncClient",
-        lambda **_kwargs: _RerankClient({"results": results}),
-    )
+
+    async def post_async(*_args: object, **_kwargs: object) -> _RerankResponse:
+        return _RerankResponse({"results": results})
+
+    monkeypatch.setattr(retrieval, "post_async", post_async)
 
     response = await retrieval.rerank(_rerank_request())
 
@@ -264,18 +250,18 @@ async def test_invalid_cached_rerank_is_ignored(
     monkeypatch.setattr(retrieval, "set_json", set_json)
     monkeypatch.setattr(settings, "rerank_api_key", "test-key")
     monkeypatch.setattr(settings, "rerank_base_url", "https://rerank.invalid")
-    monkeypatch.setattr(
-        retrieval.httpx,
-        "AsyncClient",
-        lambda **_kwargs: _RerankClient(
+
+    async def post_async(*_args: object, **_kwargs: object) -> _RerankResponse:
+        return _RerankResponse(
             {
                 "results": [
                     {"index": 1, "relevance_score": 0.95},
                     {"index": 0, "relevance_score": 0.75},
                 ]
             }
-        ),
-    )
+        )
+
+    monkeypatch.setattr(retrieval, "post_async", post_async)
 
     response = await retrieval.rerank(_rerank_request())
 

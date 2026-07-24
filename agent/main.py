@@ -13,6 +13,7 @@ import os
 import re
 import uuid
 from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header
@@ -23,6 +24,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_
 from auth import assert_agent_auth_config, require_agent_token
 from db import assert_embedding_dim, health_ok, settings
 from embed import embed_text
+from http_client import close_clients, init_async_client, init_sync_client
 from llm import ChunkView
 from rag import parse, run_chat_resilient, run_plan, run_quiz
 from retrieval import analyze_query, rerank
@@ -40,15 +42,23 @@ from schemas import (
     RerankResponse,
 )
 
-app = FastAPI(title="learning-buddy-agent")
-RAG_STAGE_SECONDS = Histogram("rag_stage_duration_seconds", "RAG stage duration", ["stage"])
-RAG_DEGRADED_TOTAL = Counter("rag_degraded_total", "RAG degraded operations", ["stage"])
 
-
-@app.on_event("startup")
-async def startup() -> None:
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """初始化并释放应用级 HTTP 连接池。"""
     assert_agent_auth_config()
     assert_embedding_dim()
+    await init_async_client()
+    init_sync_client()
+    try:
+        yield
+    finally:
+        await close_clients()
+
+
+app = FastAPI(title="learning-buddy-agent", lifespan=lifespan)
+RAG_STAGE_SECONDS = Histogram("rag_stage_duration_seconds", "RAG stage duration", ["stage"])
+RAG_DEGRADED_TOTAL = Counter("rag_degraded_total", "RAG degraded operations", ["stage"])
 
 
 app.add_middleware(

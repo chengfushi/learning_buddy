@@ -10,9 +10,8 @@ from __future__ import annotations
 import re
 from typing import Any, cast
 
-import httpx
-
 from db import settings
+from http_client import post_sync
 from pipeline import redact_for_cloud
 
 NO_EVIDENCE_RESPONSE = "当前知识库未找到依据"
@@ -124,7 +123,7 @@ class OpenAILLM(LLM):
     """OpenAI 兼容 Chat Completions（可选）。"""
 
     def _complete(self, system: str, user: str) -> str:
-        resp = httpx.post(
+        resp = post_sync(
             f"{settings.llm_base_url.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {settings.llm_api_key}"},
             json={
