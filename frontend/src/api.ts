@@ -290,13 +290,13 @@ const MaterialProcessingSchema: z.ZodType<MaterialProcessing> = z.object({
 });
 
 export function getToken(): string | null {
-	return accessToken;
+  return accessToken;
 }
 export function setToken(t: string): void {
-	accessToken = t;
+  accessToken = t;
 }
 export function clearToken(): void {
-	accessToken = null;
+  accessToken = null;
 }
 
 let accessToken: string | null = null;
@@ -326,7 +326,13 @@ async function request<T>(
     body: body !== undefined ? JSON.stringify(body) : undefined,
     credentials: "include",
   });
-  if (res.status === 401 && canRefresh && path !== "/auth/refresh" && path !== "/auth/login" && path !== "/auth/register") {
+  if (
+    res.status === 401 &&
+    canRefresh &&
+    path !== "/auth/refresh" &&
+    path !== "/auth/login" &&
+    path !== "/auth/register"
+  ) {
     try {
       await refreshAccessToken();
       return request(method, path, body, schema, false);

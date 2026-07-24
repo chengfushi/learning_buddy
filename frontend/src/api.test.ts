@@ -59,9 +59,7 @@ describe("api", () => {
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ access_token: "rotated-token" }), { status: 200 }),
       )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ user: { ID: 1 } }), { status: 200 }),
-      );
+      .mockResolvedValueOnce(new Response(JSON.stringify({ user: { ID: 1 } }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
     await expect(api.me()).resolves.toEqual({ user: { ID: 1 } });
