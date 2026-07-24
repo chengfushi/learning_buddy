@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -24,6 +25,10 @@ type planReq struct {
 
 func (h *Handlers) createPlan(c *gin.Context) {
 	uid := middleware.CtxUserID(c)
+	if !h.allowAI(c, uid, "plan", h.Svc.Cfg.PlanDailyTokenLimit) {
+		return
+	}
+	started := time.Now()
 	var req planReq
 	if err := c.ShouldBindJSON(&req); err != nil || req.Goal == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请提供学习目标 goal"})
@@ -31,6 +36,7 @@ func (h *Handlers) createPlan(c *gin.Context) {
 	}
 	res, err := h.Svc.Agent.Plan(c.Request.Context(), uid, req.Goal, req.Deadline)
 	if err != nil {
+		h.recordAIUsage(c, uid, "plan", started, "failed", err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "Agent 规划失败：" + err.Error()})
 		return
 	}
@@ -51,7 +57,9 @@ func (h *Handlers) createPlan(c *gin.Context) {
 		return
 	}
 	_ = h.Svc.Repos.RecordTokenUsage(c.Request.Context(), &model.TokenUsage{
-		UserID: uid, Service: "plan", TotalTokens: 1,
+		UserID: uid, Service: "plan", Model: "agent", TotalTokens: 1,
+		Status: "success", LatencyMS: time.Since(started).Milliseconds(),
+		EstimatedCostMicros: 1,
 	})
 	c.JSON(http.StatusOK, gin.H{"plan": plan})
 }
@@ -76,6 +84,10 @@ type exerciseResponse struct {
 
 func (h *Handlers) createQuiz(c *gin.Context) {
 	uid := middleware.CtxUserID(c)
+	if !h.allowAI(c, uid, "quiz", h.Svc.Cfg.QuizDailyTokenLimit) {
+		return
+	}
+	started := time.Now()
 	var req quizReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请求格式错误"})
@@ -86,6 +98,7 @@ func (h *Handlers) createQuiz(c *gin.Context) {
 	}
 	items, err := h.Svc.Agent.Quiz(c.Request.Context(), uid, req.Topic, req.MaterialID, req.Count)
 	if err != nil {
+		h.recordAIUsage(c, uid, "quiz", started, "failed", err)
 		if errors.Is(err, repository.ErrNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "资料不存在"})
 			return
@@ -113,9 +126,40 @@ func (h *Handlers) createQuiz(c *gin.Context) {
 		}
 	}
 	_ = h.Svc.Repos.RecordTokenUsage(c.Request.Context(), &model.TokenUsage{
-		UserID: uid, Service: "quiz", TotalTokens: 1,
+		UserID: uid, Service: "quiz", Model: "agent", TotalTokens: 1,
+		Status: "success", LatencyMS: time.Since(started).Milliseconds(),
+		EstimatedCostMicros: 1,
 	})
 	c.JSON(http.StatusOK, gin.H{"exercises": exercises})
+}
+
+func (h *Handlers) allowAI(c *gin.Context, userID int64, serviceName string, dailyLimit int) bool {
+	allowed, _ := h.Svc.RateLimiter.Allow(c.Request.Context(), userID, serviceName)
+	if !allowed {
+		c.Header("Retry-After", "60")
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "请求过于频繁，请稍后再试"})
+		return false
+	}
+	if dailyLimit > 0 {
+		used, err := h.Svc.Repos.DailyTokenUsage(c.Request.Context(), userID, serviceName)
+		if err == nil && used >= dailyLimit {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "已达到今日额度"})
+			return false
+		}
+	}
+	return true
+}
+
+func (h *Handlers) recordAIUsage(c *gin.Context, userID int64, serviceName string, started time.Time, status string, callErr error) {
+	var errorType *string
+	if callErr != nil {
+		value := fmt.Sprintf("%T", callErr)
+		errorType = &value
+	}
+	_ = h.Svc.Repos.RecordTokenUsage(c.Request.Context(), &model.TokenUsage{
+		UserID: userID, Service: serviceName, Model: "agent", Status: status,
+		LatencyMS: time.Since(started).Milliseconds(), ErrorType: errorType,
+	})
 }
 
 type answerReq struct {
