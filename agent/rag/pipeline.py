@@ -24,7 +24,7 @@ from core.http_client import post_sync
 from core.storage import read_source, write_derived
 from core.utils import estimate_tokens, redact_for_cloud
 
-__all__ = ["estimate_tokens", "redact_for_cloud", "process_document", "PipelineResult"]
+__all__ = ["estimate_tokens", "httpx", "process_document", "PipelineResult", "redact_for_cloud"]
 
 StageCallback = Callable[[str, dict[str, int | str]], None]
 logger = logging.getLogger("agent.pipeline")
