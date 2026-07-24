@@ -47,8 +47,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: agent/requirements.txt
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "agent/uv.lock"
 
       - uses: actions/setup-node@v4
         with:
@@ -123,14 +126,14 @@ jobs:
 
       - name: Install Agent dependencies
         working-directory: agent
-        run: python -m pip install -r requirements.txt
+        run: uv sync
 
       - name: Agent lint and tests
         working-directory: agent
         run: |
-          ruff check .
-          python -m mypy --strict .
-          python -m pytest tests/ -v --cov=. --cov-fail-under=70 --cov-report=term-missing --cov-report=xml:coverage.xml
+          uv run ruff check .
+          uv run mypy --strict .
+          uv run pytest tests/ -v --cov=. --cov-fail-under=70 --cov-report=term-missing --cov-report=xml:coverage.xml
 
       - name: Install Frontend dependencies
         working-directory: frontend
@@ -154,7 +157,7 @@ jobs:
           }
           trap cleanup EXIT
 
-          (cd agent && python -m uvicorn main:app --host 127.0.0.1 --port 8000) >/tmp/agent.log 2>&1 &
+          (cd agent && uv run uvicorn main:app --host 127.0.0.1 --port 8000) >/tmp/agent.log 2>&1 &
           AGENT_PID=$!
           for _ in $(seq 1 40); do
             curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1 && break

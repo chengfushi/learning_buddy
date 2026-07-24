@@ -28,13 +28,13 @@ dev-rebuild:
 format:
 	cd backend && gofmt -w .
 	cd frontend && npm run format
-	cd agent && ruff format .
+	cd agent && uv run ruff format .
 
 ## 静态检查
 lint:
 	cd backend && golangci-lint run
 	cd frontend && npm run lint
-	cd agent && ruff check .
+	cd agent && uv run ruff check .
 
 ## 按文件名顺序执行全部数据库迁移；调用示例：DB_DSN=postgres://... make migrate
 migrate:

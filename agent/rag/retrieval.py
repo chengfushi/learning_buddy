@@ -20,6 +20,8 @@ from models import (
 )
 from services.embed import embed_text
 
+__all__ = ["estimate_tokens"]
+
 _CONTEXTUAL_REFERENCE = re.compile(
     r"^(?:那|那么|然后|它|他|她|其|这个|那个|这些|那些|上述|上面|前面|其中|"
     r"(?:该|此)(?:参数|配置|功能|服务|接口|模块|组件|系统|方案|文档|命令|错误|问题|"
