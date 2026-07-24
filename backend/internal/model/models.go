@@ -292,13 +292,18 @@ func (UserProfile) TableName() string { return "user_profiles" }
 
 // TokenUsage 成本归因（F8 限流/额度）。
 type TokenUsage struct {
-	ID               int64     `gorm:"primaryKey;column:id"`
-	UserID           int64     `gorm:"column:user_id"`
-	Service          string    `gorm:"column:service"` // chat/plan/quiz
-	PromptTokens     int       `gorm:"column:prompt_tokens"`
-	CompletionTokens int       `gorm:"column:completion_tokens"`
-	TotalTokens      int       `gorm:"column:total_tokens"`
-	CreatedAt        time.Time `gorm:"column:created_at"`
+	ID                  int64     `gorm:"primaryKey;column:id"`
+	UserID              int64     `gorm:"column:user_id"`
+	Service             string    `gorm:"column:service"` // chat/plan/quiz
+	Model               string    `gorm:"column:model"`
+	PromptTokens        int       `gorm:"column:prompt_tokens"`
+	CompletionTokens    int       `gorm:"column:completion_tokens"`
+	TotalTokens         int       `gorm:"column:total_tokens"`
+	Status              string    `gorm:"column:status"`
+	LatencyMS           int64     `gorm:"column:latency_ms"`
+	EstimatedCostMicros int64     `gorm:"column:estimated_cost_micros"`
+	ErrorType           *string   `gorm:"column:error_type"`
+	CreatedAt           time.Time `gorm:"column:created_at"`
 }
 
 func (TokenUsage) TableName() string { return "token_usage" }

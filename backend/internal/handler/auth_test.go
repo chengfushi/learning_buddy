@@ -153,7 +153,7 @@ func newTestRouterWithServices(t *testing.T) (*gin.Engine, *service.Services) {
 	}
 	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&model.RefreshToken{}))
+	require.NoError(t, db.AutoMigrate(&model.RefreshToken{}, &model.TokenUsage{}))
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })

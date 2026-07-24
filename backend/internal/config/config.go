@@ -18,7 +18,11 @@ type Config struct {
 	AgentSharedSecret    string
 	RedisAddr            string
 	ChatRateLimitPerMin  int
+	PlanRateLimitPerMin  int
+	QuizRateLimitPerMin  int
 	ChatDailyTokenLimit  int
+	PlanDailyTokenLimit  int
+	QuizDailyTokenLimit  int
 	ParseAlertWebhookURL string
 	EmbeddingDim         int
 	Addr                 string
@@ -78,7 +82,11 @@ func Load() *Config {
 		AgentSharedSecret:    os.Getenv("AGENT_SHARED_SECRET"),
 		RedisAddr:            envOr("REDIS_ADDR", ""),
 		ChatRateLimitPerMin:  envInt("CHAT_RATE_LIMIT_PER_MIN", 20),
+		PlanRateLimitPerMin:  envInt("PLAN_RATE_LIMIT_PER_MIN", 10),
+		QuizRateLimitPerMin:  envInt("QUIZ_RATE_LIMIT_PER_MIN", 10),
 		ChatDailyTokenLimit:  envInt("CHAT_DAILY_TOKEN_LIMIT", 100000),
+		PlanDailyTokenLimit:  envInt("PLAN_DAILY_TOKEN_LIMIT", 100),
+		QuizDailyTokenLimit:  envInt("QUIZ_DAILY_TOKEN_LIMIT", 100),
 		ParseAlertWebhookURL: os.Getenv("PARSE_ALERT_WEBHOOK_URL"),
 		EmbeddingDim:         dim,
 		Addr:                 addr,

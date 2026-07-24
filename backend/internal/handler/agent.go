@@ -52,6 +52,7 @@ func (h *Handlers) chat(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	started := time.Now()
 	var err error
 	// 已有会话必须与本次资料作用域一致；新会话在资料鉴权成功后再创建。
 	sessionID := req.SessionID
@@ -242,11 +243,15 @@ streamLoop:
 	}
 	if promptTokens > 0 || completionTokens > 0 {
 		_ = h.Svc.Repos.RecordTokenUsage(ctx, &model.TokenUsage{
-			UserID:           uid,
-			Service:          "chat",
-			PromptTokens:     promptTokens,
-			CompletionTokens: completionTokens,
-			TotalTokens:      promptTokens + completionTokens,
+			UserID:              uid,
+			Service:             "chat",
+			Model:               "agent",
+			PromptTokens:        promptTokens,
+			CompletionTokens:    completionTokens,
+			TotalTokens:         promptTokens + completionTokens,
+			EstimatedCostMicros: int64(promptTokens + completionTokens),
+			Status:              map[bool]string{true: "failed", false: "success"}[agentFailed || completionErr != ""],
+			LatencyMS:           time.Since(started).Milliseconds(),
 		})
 	}
 	if assistantMessage != nil {
