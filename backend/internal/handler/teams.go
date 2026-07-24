@@ -7,6 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"learning_buddy/backend/internal/middleware"
+	"learning_buddy/backend/internal/service"
 )
 
 func (h *Handlers) listTeams(c *gin.Context) {
@@ -102,7 +103,7 @@ func (h *Handlers) approveMember(c *gin.Context) {
 		return
 	}
 	if err := h.Svc.Teams.ApproveMember(c.Request.Context(), teamID, uid, targetID); err != nil {
-		if errors.Is(err, middleware.ErrForbidden) {
+		if errors.Is(err, middleware.ErrForbidden) || errors.Is(err, service.ErrForbidden) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "仅团队创建者可审批"})
 			return
 		}
@@ -121,7 +122,7 @@ func (h *Handlers) listMembers(c *gin.Context) {
 	}
 	members, err := h.Svc.Teams.ListMembers(c.Request.Context(), teamID, uid)
 	if err != nil {
-		if errors.Is(err, middleware.ErrForbidden) {
+		if errors.Is(err, middleware.ErrForbidden) || errors.Is(err, service.ErrForbidden) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "仅团队创建者可查看成员"})
 			return
 		}

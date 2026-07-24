@@ -73,8 +73,11 @@ func (s *TeamService) JoinByCode(ctx context.Context, userID int64, code string)
 	}
 	// 幂等：已存在成员关系则直接返回
 	var existing model.TeamMember
-	err = s.repos.DB.WithContext(ctx).First(&existing, "team_id = ? AND user_id = ?", t.ID, userID).Error
-	if err == nil {
+	result := s.repos.DB.WithContext(ctx).
+		Where("team_id = ? AND user_id = ?", t.ID, userID).
+		Limit(1).
+		Find(&existing)
+	if result.Error == nil && result.RowsAffected > 0 {
 		return &existing, nil
 	}
 	m := model.TeamMember{
@@ -129,7 +132,8 @@ func (s *TeamService) ListMembers(ctx context.Context, teamID, ownerID int64) ([
 
 func (s *TeamService) getTeam(ctx context.Context, id int64) (*model.Team, error) {
 	var t model.Team
-	if err := s.repos.DB.WithContext(ctx).First(&t, "id = ?", id).Error; err != nil {
+	result := s.repos.DB.WithContext(ctx).Where("id = ?", id).Limit(1).Find(&t)
+	if result.Error != nil || result.RowsAffected == 0 {
 		return nil, repository.ErrNotFound
 	}
 	return &t, nil

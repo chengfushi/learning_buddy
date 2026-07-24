@@ -86,8 +86,15 @@ func (r *Repositories) ListStudyPlans(ctx context.Context, userID int64) ([]mode
 
 func (r *Repositories) GetStudyPlan(ctx context.Context, id, userID int64) (*model.StudyPlan, error) {
 	var p model.StudyPlan
-	if err := r.DB.WithContext(ctx).First(&p, "id = ? AND user_id = ?", id, userID).Error; err != nil {
-		return nil, err
+	result := r.DB.WithContext(ctx).
+		Where("id = ? AND user_id = ?", id, userID).
+		Limit(1).
+		Find(&p)
+	if result.Error != nil {
+		return nil, fmt.Errorf("get study plan: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return nil, ErrNotFound
 	}
 	return &p, nil
 }

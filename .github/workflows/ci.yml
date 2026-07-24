@@ -64,12 +64,53 @@ jobs:
             psql -h 127.0.0.1 -U postgres -d learning_buddy -v ON_ERROR_STOP=1 -f "$migration"
           done
 
+      - name: Verify migrations are repeatable and complete
+        env:
+          PGPASSWORD: postgres
+        run: |
+          for migration in backend/migrations/*.sql; do
+            psql -h 127.0.0.1 -U postgres -d learning_buddy -v ON_ERROR_STOP=1 -f "$migration"
+          done
+          psql -h 127.0.0.1 -U postgres -d learning_buddy -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$
+          DECLARE
+            required_table text;
+          BEGIN
+            FOREACH required_table IN ARRAY ARRAY[
+              'users', 'teams', 'team_members', 'materials', 'material_chunks',
+              'agent_sessions', 'agent_messages', 'exercises', 'study_plans',
+              'token_usage', 'message_feedback', 'rag_runs', 'refresh_tokens'
+            ] LOOP
+              IF to_regclass(required_table) IS NULL THEN
+                RAISE EXCEPTION 'required table is missing: %', required_table;
+              END IF;
+            END LOOP;
+          END $$;
+          DO $$
+          BEGIN
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_indexes
+               WHERE indexname = 'uq_material_chunks_version_kind_idx'
+            ) THEN
+              RAISE EXCEPTION 'required index is missing: uq_material_chunks_version_kind_idx';
+            END IF;
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_constraint
+               WHERE conname = 'uni_refresh_tokens_token_hash'
+            ) THEN
+              RAISE EXCEPTION 'required constraint is missing: uni_refresh_tokens_token_hash';
+            END IF;
+          END $$;
+          SQL
+
       - name: Backend vet, tests, and coverage report
         working-directory: backend
         run: |
           go vet ./...
-          go test ./... -coverprofile=coverage.out
+          go test ./... -covermode=atomic -coverprofile=coverage.out
           go tool cover -func=coverage.out | tee coverage.txt
+          coverage=$(go tool cover -func=coverage.out | awk '/^total:/ {gsub("%", "", $3); print $3}')
+          awk -v coverage="$coverage" 'BEGIN { if (coverage < 40) { printf "Backend coverage %.1f%% is below the 40%% gate\n", coverage; exit 1 } }'
 
       - name: Install Agent dependencies
         working-directory: agent

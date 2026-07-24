@@ -120,8 +120,12 @@ func (r *Repositories) GetMaterial(ctx context.Context, id int64) (*model.Materi
 // TeamByJoinCode 凭班级码取 teacher team（F2.5）。
 func (r *Repositories) TeamByJoinCode(ctx context.Context, code string) (*model.Team, error) {
 	var t model.Team
-	if err := r.DB.WithContext(ctx).First(&t, "join_code = ?", code).Error; err != nil {
-		return nil, err
+	result := r.DB.WithContext(ctx).Where("join_code = ?", code).Limit(1).Find(&t)
+	if result.Error != nil {
+		return nil, fmt.Errorf("get team by join code: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return nil, ErrNotFound
 	}
 	return &t, nil
 }
@@ -132,11 +136,12 @@ var ErrNotFound = errors.New("record not found")
 // GetUser 按 ID 取用户（不含密码哈希外泄）。
 func (r *Repositories) GetUser(ctx context.Context, id int64) (*model.User, error) {
 	var u model.User
-	if err := r.DB.WithContext(ctx).First(&u, "id = ?", id).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrNotFound
-		}
-		return nil, err
+	result := r.DB.WithContext(ctx).Where("id = ?", id).Limit(1).Find(&u)
+	if result.Error != nil {
+		return nil, fmt.Errorf("get user: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return nil, ErrNotFound
 	}
 	return &u, nil
 }
