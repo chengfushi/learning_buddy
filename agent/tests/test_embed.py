@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import cast
 
-import httpx
 import pytest
 
 import embed
@@ -25,7 +24,7 @@ def test_openai_embedder_uses_caller_timeout(monkeypatch: pytest.MonkeyPatch) ->
         captured["timeout"] = float(cast(float, kwargs["timeout"]))
         return _EmbeddingResponse()
 
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(embed, "post_sync", fake_post)
     result = embed.OpenAIEmbedder().embed("query", timeout_s=settings.retriever_timeout_s)
 
     assert result == [0.1, 0.2]
@@ -39,7 +38,7 @@ def test_openai_embedder_defaults_to_parser_timeout(monkeypatch: pytest.MonkeyPa
         captured["timeout"] = float(cast(float, kwargs["timeout"]))
         return _EmbeddingResponse()
 
-    monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(embed, "post_sync", fake_post)
     embed.OpenAIEmbedder().embed("material chunk")
 
     assert captured["timeout"] == settings.parser_embedding_timeout_s

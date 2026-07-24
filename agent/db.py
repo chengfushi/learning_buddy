@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     pg_dsn: str = "postgres://postgres:postgres@localhost:5432/learning_buddy"
     redis_addr: str = "localhost:6379"
     redis_timeout_s: float = 0.2
+    external_max_connections: int = 32
+    external_keepalive_connections: int = 16
+    external_retry_attempts: int = 2
+    external_retry_backoff_s: float = 0.1
+    external_circuit_failures: int = 3
+    external_circuit_reset_s: float = 10.0
     embedding_dim: int = 1024  # 全库必须一致（engineering-standards R1）；真实 embedding 为 1024 维
     embedding_provider: str = "openai"  # local | openai（接入真实嵌入走 openai 兼容）
 

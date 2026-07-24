@@ -19,6 +19,8 @@ from docx import Document
 from docx.document import Document as DocxDocument
 from docx.oxml.xmlchemy import BaseOxmlElement
 
+from http_client import post_sync
+
 __all__ = ["estimate_tokens", "httpx"]
 
 from db import settings
@@ -265,7 +267,7 @@ def enrich_metadata(text: str) -> tuple[str, list[str], list[str]]:
         "questions 为 3 到 5 个该资料能回答的问题。\n\n" + redact_for_cloud(text[:30000])
     )
     try:
-        response = httpx.post(
+        response = post_sync(
             f"{settings.llm_base_url.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {settings.llm_api_key}"},
             json={
@@ -300,7 +302,7 @@ def analyze_image(asset: ExtractedAsset) -> tuple[str, str]:
         return "", "文档图片"
     encoded = base64.b64encode(asset.data).decode()
     try:
-        response = httpx.post(
+        response = post_sync(
             f"{base_url.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {api_key}"},
             json={

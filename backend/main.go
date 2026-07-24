@@ -57,6 +57,14 @@ func main() {
 	go svcs.Materials.RunParseDispatcher(ctx)
 	r := gin.Default()
 	r.Use(observability.HTTPMetrics())
+	r.GET("/health", func(c *gin.Context) {
+		sqlDB, err := db.DB()
+		if err != nil || sqlDB.PingContext(c.Request.Context()) != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "db_down"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 	handler.Register(r, svcs)
 
