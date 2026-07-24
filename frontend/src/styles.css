@@ -26,6 +26,19 @@ body {
   color: var(--ink);
   font-size: 14px;
 }
+
+.state-card {
+  max-width: 560px;
+  margin: 6rem auto;
+  padding: 2rem;
+  text-align: center;
+}
+
+.error-state {
+  border: 1px solid #e6b8b8;
+  border-radius: 12px;
+  background: #fff8f8;
+}
 h1,
 h2,
 h3 {
