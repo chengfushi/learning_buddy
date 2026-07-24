@@ -1,7 +1,7 @@
 """资料解析与生成编排。
 
-权限边界（engineering-standards §0 / R2）：向量检索及可见性过滤全部由 Backend
-repository 完成；Agent 只消费后端传入的已授权 chunks，永远不查询权限表或拼谓词。
+权限边界：向量检索及可见性过滤全部由 Backend repository 完成；
+Agent 只消费后端传入的已授权 chunks，永远不查询权限表或拼谓词。
 """
 
 from __future__ import annotations
@@ -14,11 +14,13 @@ from typing import Any
 from pgvector import Vector
 from psycopg2.extras import Json
 
-from db import get_conn, settings
-from embed import embed_text
-from llm import NO_EVIDENCE_RESPONSE, ChunkView, MockLLM, get_llm
-from pipeline import process_document, redact_for_cloud
-from schemas import PlanResult, QuizResult
+from core.config import settings
+from core.db import get_conn
+from core.utils import redact_for_cloud
+from models import ChunkView, PlanResult, QuizResult
+from rag.pipeline import process_document
+from services.embed import embed_text
+from services.llm import NO_EVIDENCE_RESPONSE, MockLLM, get_llm
 
 logger = logging.getLogger("agent.rag")
 
@@ -49,7 +51,6 @@ def _record_processing_stage(
     status: str = "running",
     error: str | None = None,
 ) -> None:
-    """记录当前解析阶段；失败不掩盖主流水线错误。"""
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -89,8 +90,6 @@ def parse(
     file_type: str,
     storage_key: str,
 ) -> dict[str, int | str]:
-    """执行 RAG v2 Parser，并仅在当前解析代次仍有效时原子替换影子索引。"""
-    # 先做无锁预检，避免已知陈旧请求继续消耗远程 Embedding 配额；写入前仍会在锁内复检。
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -149,8 +148,6 @@ def parse(
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            # HTTP 超时不会终止 FastAPI 的同步线程。advisory lock 串行化同资料写入，
-            # 行锁 + parse_generation/status 阻止超时旧请求覆盖新任务或失败终态。
             cur.execute("SELECT pg_advisory_xact_lock(%s)", (material_id,))
             cur.execute(
                 "SELECT team_id, title, parse_generation, parse_status "
@@ -169,7 +166,6 @@ def parse(
                     parse_status,
                 )
 
-            # 仅替换 rag-v2 影子索引；legacy-v1 保留用于原子回滚。
             cur.execute(
                 "DELETE FROM material_chunks WHERE material_id = %s AND index_version = %s",
                 (material_id, settings.rag_index_version),
@@ -241,8 +237,6 @@ def parse(
                 (settings.rag_index_version,),
             )
             v2_is_active = bool(cur.fetchone()[0])
-            # building 期间既有资料继续读 legacy；全局激活脚本再一次性切换。
-            # 全新资料没有 legacy，直接使用 v2，避免上传后暂时不可检索。
             visible_index_version = (
                 settings.rag_index_version if v2_is_active or not has_legacy else "legacy-v1"
             )
@@ -291,7 +285,6 @@ async def run_chat_resilient(
     history: object = None,
     trace_id: str = "",
 ) -> tuple[str, list[dict[str, Any]]]:
-    """按 Tutor 独立预算生成；检索超时降级已由 Backend 在权限过滤后处理。"""
     evidence = _evidence_chunks(chunks)
     if not evidence:
         logger.info("tutor refused without evidence", extra={"trace_id": trace_id})
@@ -324,7 +317,6 @@ async def run_chat_resilient(
 
 
 def _evidence_chunks(chunks: list[ChunkView]) -> list[ChunkView]:
-    """空白片段不构成可引用证据，也不能触发生成模型。"""
     return [chunk for chunk in chunks if chunk.content.strip()]
 
 

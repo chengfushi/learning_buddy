@@ -4,8 +4,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-from auth import AGENT_TOKEN_HEADER, assert_agent_auth_config
-from db import settings
+from core.auth import AGENT_TOKEN_HEADER, assert_agent_auth_config
+from core.config import settings
 
 PROTECTED_PATHS = ["/parse", "/embed", "/chat", "/plan", "/quiz"]
 TEST_SECRET = "unit-test-agent-secret"

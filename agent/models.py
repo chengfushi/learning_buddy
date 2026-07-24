@@ -1,4 +1,4 @@
-"""Agent 服务请求/响应模型（与后端 service/agent.go 的 HTTP 契约保持一致）。"""
+"""Agent 服务请求/响应模型与共享数据类型。"""
 
 from __future__ import annotations
 
@@ -12,6 +12,34 @@ from pydantic import (
     StringConstraints,
     model_validator,
 )
+
+
+class ChunkView:
+    def __init__(
+        self,
+        team_id: int,
+        material_id: int,
+        chapter: str,
+        chunk_idx: int,
+        content: str,
+        chunk_id: int | None = None,
+        title: str = "",
+        kind: str = "body",
+        page_number: int | None = None,
+        score: float = 0.0,
+        asset_id: int | None = None,
+    ) -> None:
+        self.team_id = team_id
+        self.material_id = material_id
+        self.chapter = chapter
+        self.chunk_idx = chunk_idx
+        self.content = content
+        self.chunk_id = chunk_id
+        self.title = title
+        self.kind = kind
+        self.page_number = page_number
+        self.score = score
+        self.asset_id = asset_id
 
 
 class ParseRequest(BaseModel):
@@ -62,7 +90,7 @@ class ChatRequest(BaseModel):
     session_id: str = ""
     history: list[ChatHistory] = []
     chunks: list[ChunkInput] = []
-    service: str = "chat"  # chat | plan | quiz
+    service: str = "chat"
     deadline: str | None = None
     count: int = 3
     goal: str | None = None

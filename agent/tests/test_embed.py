@@ -4,8 +4,8 @@ from typing import cast
 
 import pytest
 
-import embed
-from db import settings
+import services.embed as embed
+from core.config import settings
 
 
 class _EmbeddingResponse:
@@ -17,7 +17,6 @@ class _EmbeddingResponse:
 
 
 def test_openai_embedder_uses_caller_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """查询和解析路径必须能向同一 Embedder 传入不同超时预算。"""
     captured: dict[str, float] = {}
 
     def fake_post(*_args: object, **kwargs: object) -> _EmbeddingResponse:

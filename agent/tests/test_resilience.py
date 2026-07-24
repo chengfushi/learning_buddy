@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-import rag
-from llm import ChunkView
+import rag.orchestrator as rag
+from models import ChunkView
 
 
 class _RecordingLLM:

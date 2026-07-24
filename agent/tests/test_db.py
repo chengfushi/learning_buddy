@@ -7,7 +7,8 @@ from contextlib import AbstractContextManager, contextmanager
 
 import pytest
 
-import db
+import core.config as config
+import core.db as db
 
 
 class _FakeCursor:
@@ -49,14 +50,14 @@ def test_assert_embedding_dim_accepts_pgvector_typmod_directly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """pgvector atttypmod 已是 N，不得按 PostgreSQL 通用 varlena 规则减 4。"""
-    monkeypatch.setattr(db, "embedding_dim", lambda: 1024)
+    monkeypatch.setattr(config, "embedding_dim", lambda: 1024)
     monkeypatch.setattr(db, "get_conn", _fake_get_conn(1024))
 
     db.assert_embedding_dim()
 
 
 def test_assert_embedding_dim_rejects_real_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(db, "embedding_dim", lambda: 1024)
+    monkeypatch.setattr(config, "embedding_dim", lambda: 1024)
     monkeypatch.setattr(db, "get_conn", _fake_get_conn(768))
 
     with pytest.raises(RuntimeError, match=r"vector\(768\)"):

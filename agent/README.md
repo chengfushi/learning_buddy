@@ -72,10 +72,10 @@ cp .env.example .env
 # 生产的 learning_parser 账号由仓库根目录 make provision-parser 创建/授权。
 
 # 2. 安装依赖
-pip install -r requirements.txt
+uv sync
 
 # 3. 启动
-python main.py
+uv run python main.py
 # 默认监听 :8000，启动时自动断言 embedding 维度一致性（R1）
 ```
 
@@ -247,17 +247,17 @@ data: {"type":"done","citations":[...]}
 
 ```bash
 # 启动服务
-python main.py
+uv run python main.py
 
 # 运行测试
-pytest -v
+uv run pytest -v
 
 # 静态检查 + 自动修复
-ruff check .
-ruff format .
+uv run ruff check .
+uv run ruff format .
 
 # 运行单个测试文件
-pytest tests/test_retrieve.py -v
+uv run pytest tests/test_retrieve.py -v
 ```
 
 ---

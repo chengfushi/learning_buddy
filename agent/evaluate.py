@@ -17,10 +17,10 @@ from typing import NotRequired, TypedDict
 
 from pgvector import Vector
 
-from db import get_conn
-from embed import embed_text
-from retrieval import rerank
-from schemas import RerankCandidate, RerankRequest
+from core.db import get_conn
+from models import RerankCandidate, RerankRequest
+from rag.retrieval import rerank
+from services.embed import embed_text
 
 
 @dataclass
@@ -34,8 +34,6 @@ class Candidate:
 
 @dataclass(frozen=True)
 class ReleaseThresholds:
-    """发布评测必须达到的最低检索质量和最高延迟。"""
-
     recall_at_20: float = 0.95
     rerank_recall_at_5: float = 0.90
     retrieval_p95_ms: float = 2500
@@ -200,8 +198,6 @@ def _case_metrics(ranking: list[int], expected: set[int], k: int) -> tuple[float
 
 
 async def evaluate(cases: list[EvaluationCase], version: str) -> EvaluationResult:
-    """评测指定索引版本并返回聚合指标和未完全召回的用例明细。"""
-
     raw5, raw20, rerank5, mrr, ndcg, latencies = [], [], [], [], [], []
     failed_cases: list[CaseFailure] = []
     for case_number, case in enumerate(cases, 1):
@@ -248,8 +244,6 @@ def release_gate_failures(
     release_version: str,
     thresholds: ReleaseThresholds,
 ) -> list[str]:
-    """返回发布门禁失败原因；空列表表示指定版本可以进入灰度。"""
-
     result = next((item for item in results if item["version"] == release_version), None)
     if result is None:
         return [f"release version {release_version!r} was not evaluated"]
@@ -277,8 +271,6 @@ def release_gate_failures(
 
 
 async def main(argv: Sequence[str] | None = None) -> int:
-    """运行离线评测；发布门禁失败时返回非零退出码。"""
-
     parser = argparse.ArgumentParser()
     parser.add_argument("cases", type=Path)
     parser.add_argument("--versions", nargs="+", default=["legacy-v1", "rag-v2"])

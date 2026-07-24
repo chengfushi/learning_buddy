@@ -8,10 +8,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-import rag
-from auth import AGENT_TOKEN_HEADER
-from db import settings
-from schemas import (
+import rag.orchestrator as rag
+from core.auth import AGENT_TOKEN_HEADER
+from core.config import settings
+from models import (
     ChatRequest,
     EmbedRequest,
     ParseRequest,

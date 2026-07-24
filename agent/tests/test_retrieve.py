@@ -10,9 +10,9 @@ import pytest
 from pgvector.psycopg2 import register_vector
 
 import main
-import rag
-from db import settings
-from embed import LocalEmbedder
+import rag.orchestrator as rag
+from core.config import settings
+from services.embed import LocalEmbedder
 
 TEAM_ID = 900002
 MATERIAL_ID = 900003
@@ -99,7 +99,6 @@ def test_parse_is_idempotent(parse_material: None, monkeypatch: pytest.MonkeyPat
 def test_timed_out_retry_cannot_duplicate_chunks(
     parse_material: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """模拟超时后的并发重试；advisory lock + 唯一索引保证无重复 chunk。"""
     embedder = LocalEmbedder()
     monkeypatch.setattr(rag, "embed_text", embedder.embed)
     text = "并发解析第一段。\n\n并发解析第二段。\n\n并发解析第三段。"
@@ -132,7 +131,6 @@ def test_timed_out_retry_cannot_duplicate_chunks(
 def test_stale_parse_generation_cannot_replace_current_chunks(
     parse_material: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """旧代次即使迟到，也不能删除或覆盖当前资料的 chunks/content。"""
     embedder = LocalEmbedder()
     embed_calls = 0
 

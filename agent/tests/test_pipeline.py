@@ -8,9 +8,9 @@ import fitz
 import pytest
 from docx import Document
 
-import pipeline
-from db import settings
-from pipeline import ExtractedAsset
+import rag.pipeline as pipeline
+from core.config import settings
+from rag.pipeline import ExtractedAsset
 
 
 def _png_pixel(red: int, green: int, blue: int) -> bytes:
