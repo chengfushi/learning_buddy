@@ -6,14 +6,11 @@ import asyncio
 import math
 import re
 
-__all__ = ["estimate_tokens"]
-
-from cache import cache_key, get_json, set_json
-from db import settings
-from embed import embed_text
-from http_client import post_async
-from pipeline import estimate_tokens, redact_for_cloud
-from schemas import (
+from core.cache import cache_key, get_json, set_json
+from core.config import settings
+from core.http_client import post_async
+from core.utils import estimate_tokens, redact_for_cloud
+from models import (
     ChatHistory,
     QueryAnalysisRequest,
     QueryAnalysisResponse,
@@ -21,6 +18,7 @@ from schemas import (
     RerankRequest,
     RerankResponse,
 )
+from services.embed import embed_text
 
 _CONTEXTUAL_REFERENCE = re.compile(
     r"^(?:那|那么|然后|它|他|她|其|这个|那个|这些|那些|上述|上面|前面|其中|"
@@ -78,7 +76,6 @@ async def _rewrite(question: str, history: list[ChatHistory]) -> tuple[str, bool
 
 
 def _valid_embedding(value: object) -> list[float] | None:
-    """拒绝维度错误、布尔值及非有限数，避免污染缓存和向量查询。"""
     if not isinstance(value, list) or len(value) != settings.embedding_dim:
         return None
     embedding: list[float] = []
@@ -93,7 +90,6 @@ def _valid_embedding(value: object) -> list[float] | None:
 
 
 async def _query_embedding(retrieval_query: str) -> list[float]:
-    """独立缓存有效向量；临时故障返回空向量但不写入缓存。"""
     cloud_query = redact_for_cloud(retrieval_query)
     key = cache_key(
         "embedding",
@@ -122,7 +118,6 @@ async def _query_embedding(retrieval_query: str) -> list[float]:
 
 
 async def analyze_query(req: QueryAnalysisRequest) -> QueryAnalysisResponse:
-    """分析查询并返回改写、关键词和向量；缓存不包含任何权限结果。"""
     history_payload = [
         {"role": item.role, "content": item.content[-2000:]} for item in req.history[-6:]
     ]
@@ -158,7 +153,6 @@ async def analyze_query(req: QueryAnalysisRequest) -> QueryAnalysisResponse:
 
 
 def _local_rerank(req: RerankRequest) -> RerankResponse:
-    # candidates 已按 RRF 排序；降级时只赋单调分数，不改变权限安全的原顺序。
     items = [
         RerankItem(chunk_id=candidate.chunk_id, score=1 / (index + 1))
         for index, candidate in enumerate(req.candidates[: req.top_n])
@@ -167,7 +161,6 @@ def _local_rerank(req: RerankRequest) -> RerankResponse:
 
 
 def _truncate_rerank_document(text: str) -> str:
-    """按模型 Token 上限保守截断，避免一个超长旧块拖垮整次重排。"""
     limit = max(1, settings.rerank_max_document_tokens)
     max_chars = limit * 4
     if len(text) <= max_chars and estimate_tokens(text) <= limit:
@@ -231,7 +224,6 @@ def _remote_rerank_items(req: RerankRequest, raw_items: object) -> list[RerankIt
 
 
 async def rerank(req: RerankRequest) -> RerankResponse:
-    """调用 qwen3-rerank；超时或协议错误时回退确定性词项重排。"""
     if not req.candidates:
         return RerankResponse(items=[], model=settings.rerank_model)
     api_key = settings.rerank_api_key or settings.embedding_api_key

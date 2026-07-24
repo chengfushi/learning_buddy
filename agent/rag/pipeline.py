@@ -13,18 +13,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import fitz
-import httpx
+import httpx  # noqa: F401  # 保留供外部向后兼容
 import yaml
 from docx import Document
 from docx.document import Document as DocxDocument
 from docx.oxml.xmlchemy import BaseOxmlElement
 
-from http_client import post_sync
+from core.config import settings
+from core.http_client import post_sync
+from core.storage import read_source, write_derived
+from core.utils import estimate_tokens, redact_for_cloud
 
-__all__ = ["estimate_tokens", "httpx"]
-
-from db import settings
-from storage import read_source, write_derived
+__all__ = ["estimate_tokens", "redact_for_cloud", "process_document", "PipelineResult"]
 
 StageCallback = Callable[[str, dict[str, int | str]], None]
 logger = logging.getLogger("agent.pipeline")
@@ -68,30 +68,8 @@ class PipelineResult:
     assets: list[ExtractedAsset] = field(default_factory=list)
 
 
-def redact_for_cloud(text: str) -> str:
-    """仅遮蔽发送到云模型的敏感片段，本地规范正文保持原内容。"""
-    patterns = [
-        (r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}", "Bearer [REDACTED]"),
-        (
-            r"(?i)\b((?:(?:aws[_-]?)?(?:access[_-]?key(?:[_-]?id)?|"
-            r"secret[_-]?access[_-]?key|session[_-]?token)|api[_-]?key|secret(?:[_-]?key)?|"
-            r"auth[_-]?token|refresh[_-]?token|password|passwd|pwd)\s*[:=]\s*)"
-            r"[\"']?[A-Za-z0-9_./+=:@-]{8,}[\"']?",
-            r"\1[REDACTED]",
-        ),
-        (r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED_AWS_ACCESS_KEY]"),
-        (r"(?i)\b(?:sk|api)[-_][A-Za-z0-9_-]{12,}\b", "[REDACTED_KEY]"),
-        (r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", "[REDACTED_EMAIL]"),
-        (r"(?<!\d)1[3-9]\d{9}(?!\d)", "[REDACTED_PHONE]"),
-    ]
-    redacted = text
-    for expression, replacement in patterns:
-        redacted = re.sub(expression, replacement, redacted)
-    return redacted
-
-
 def _rules() -> tuple[str, list[tuple[str, re.Pattern[str]]]]:
-    path = Path(__file__).with_name("cleaning_rules.yml")
+    path = Path(__file__).parent.parent / "cleaning_rules.yml"
     payload = yaml.safe_load(path.read_text(encoding="utf-8"))
     compiled = [
         (item["name"], re.compile(item["expression"])) for item in payload.get("patterns", [])
@@ -100,7 +78,6 @@ def _rules() -> tuple[str, list[tuple[str, re.Pattern[str]]]]:
 
 
 def clean_markdown(text: str) -> tuple[str, dict[str, int | list[str]]]:
-    """应用可审计规则并收敛空白，不吞掉正文结构。"""
     _version, rules = _rules()
     cleaned = (text or "").replace("\r\n", "\n").replace("\r", "\n")
     stats: dict[str, int | list[str]] = {}
@@ -115,17 +92,9 @@ def clean_markdown(text: str) -> tuple[str, dict[str, int | list[str]]]:
     return cleaned, stats
 
 
-def estimate_tokens(text: str) -> int:
-    """无额外 tokenizer 依赖的保守估算；中文按字、英文按词计数。"""
-    cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
-    latin = len(re.findall(r"[A-Za-z0-9_./:-]+", text))
-    return cjk + latin
-
-
 def _docx_assets_in_element(
     element: BaseOxmlElement, document: DocxDocument, heading_path: str
 ) -> list[ExtractedAsset]:
-    """按 XML 出现顺序提取当前段落或表格中的内嵌图片。"""
     assets: list[ExtractedAsset] = []
     for blip in element.xpath(".//a:blip"):
         relation_id = blip.get(
@@ -152,7 +121,6 @@ def _extract_docx(blob: bytes) -> tuple[str, list[ExtractedAsset]]:
     blocks: list[str] = []
     assets: list[ExtractedAsset] = []
     heading_stack: list[str] = []
-    # 遍历 body 子节点，避免把所有表格错误地移到正文末尾。
     paragraphs = iter(document.paragraphs)
     tables = iter(document.tables)
     for element in document.element.body.iterchildren():
@@ -192,7 +160,6 @@ def _extract_pdf(blob: bytes) -> tuple[str, list[ExtractedAsset]]:
     for page_index, page in enumerate(document):
         text = page.get_text("text").strip()
         if estimate_tokens(text) < 20:
-            # 扫描页或低文本密度页渲染为整页图片交给 OCR/VL；正文提取失败不阻断入库。
             pixmap = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
             assets.append(
                 ExtractedAsset(
@@ -234,7 +201,6 @@ def _extract_pdf(blob: bytes) -> tuple[str, list[ExtractedAsset]]:
 def extract_document(
     file_type: str, content: str, storage_key: str
 ) -> tuple[str, list[ExtractedAsset]]:
-    """按受支持格式提取规范文本与图片；文本请求保持旧接口兼容。"""
     kind = (file_type or "txt").lower().lstrip(".")
     if kind in {"txt", "md", "markdown"} and content:
         return content, []
@@ -259,7 +225,6 @@ def _fallback_metadata(text: str) -> tuple[str, list[str], list[str]]:
 
 
 def enrich_metadata(text: str) -> tuple[str, list[str], list[str]]:
-    """生成摘要、关键词和候选问题；云调用失败时确定性降级。"""
     if not settings.llm_api_key or not settings.llm_base_url:
         return _fallback_metadata(text)
     prompt = (
@@ -293,7 +258,6 @@ def enrich_metadata(text: str) -> tuple[str, list[str], list[str]]:
 
 
 def analyze_image(asset: ExtractedAsset) -> tuple[str, str]:
-    """调用 Qwen OCR/VL 生成图片 OCR 与说明，失败时保留可展示资产。"""
     api_key = settings.vision_api_key or settings.embedding_api_key
     base_url = settings.vision_base_url or settings.embedding_base_url
     if not api_key or not base_url or not settings.vision_allow_raw_images:
@@ -334,7 +298,6 @@ def analyze_image(asset: ExtractedAsset) -> tuple[str, str]:
 
 
 def chunk_body(markdown: str) -> list[ChunkRecord]:
-    """短文档整篇入库；长文档按段落递归组成 token 有界块。"""
     total_tokens = estimate_tokens(markdown)
     if len(markdown) <= settings.short_document_chars and total_tokens <= 3500:
         pages = re.findall(r"(?m)^#{1,6}\s+第\s*(\d+)\s*页\s*$", markdown)
@@ -370,7 +333,6 @@ def chunk_body(markdown: str) -> list[ChunkRecord]:
             if current:
                 chunks.append("\n\n".join(current))
                 current, current_tokens = [], 0
-            # 字符上限不大于 token 上限，对中英文都是保守边界；超长无换行表格也不会越界。
             step = settings.max_chunk_tokens
             overlap_chars = min(settings.chunk_overlap_tokens, max(0, step - 1))
             cursor = 0
@@ -417,7 +379,6 @@ def process_document(
     storage_key: str,
     stage_callback: StageCallback | None = None,
 ) -> PipelineResult:
-    """执行完整解析流水线并产出可原子持久化的 RAG v2 结果。"""
     notify = stage_callback or (lambda _stage, _progress: None)
     notify("extract", {})
     raw_text, assets = extract_document(file_type, content, storage_key)

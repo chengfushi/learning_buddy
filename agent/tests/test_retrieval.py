@@ -4,9 +4,9 @@ from collections.abc import Callable
 
 import pytest
 
-import retrieval
-from db import settings
-from schemas import ChatHistory, QueryAnalysisRequest, RerankCandidate, RerankRequest
+import rag.retrieval as retrieval
+from core.config import settings
+from models import ChatHistory, QueryAnalysisRequest, RerankCandidate, RerankRequest
 
 
 def _install_memory_cache(monkeypatch: pytest.MonkeyPatch) -> dict[str, object]:

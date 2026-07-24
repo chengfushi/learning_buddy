@@ -3,8 +3,8 @@ from __future__ import annotations
 import httpx
 import pytest
 
-import http_client
-from db import settings
+import core.http_client as http_client
+from core.config import settings
 
 
 class _Response:

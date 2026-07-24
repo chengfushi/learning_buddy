@@ -21,16 +21,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
-from auth import assert_agent_auth_config, require_agent_token
-from db import assert_embedding_dim, health_ok, settings
-from embed import embed_text
-from http_client import close_clients, init_async_client, init_sync_client
-from llm import ChunkView
-from rag import parse, run_chat_resilient, run_plan, run_quiz
-from retrieval import analyze_query, rerank
-from schemas import (
+from core.auth import assert_agent_auth_config, require_agent_token
+from core.config import settings
+from core.db import assert_embedding_dim, health_ok
+from core.http_client import close_clients, init_async_client, init_sync_client
+from models import (
     ChatRequest,
     ChunkInput,
+    ChunkView,
     EmbedRequest,
     EmbedResponse,
     ParseRequest,
@@ -41,11 +39,13 @@ from schemas import (
     RerankRequest,
     RerankResponse,
 )
+from rag.orchestrator import parse, run_chat_resilient, run_plan, run_quiz
+from rag.retrieval import analyze_query, rerank
+from services.embed import embed_text
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    """初始化并释放应用级 HTTP 连接池。"""
     assert_agent_auth_config()
     assert_embedding_dim()
     await init_async_client()
@@ -99,7 +99,6 @@ def health() -> dict[str, str]:
 
 @app.get("/metrics")
 def metrics() -> Response:
-    """导出不带用户或查询标签的 Prometheus 指标。"""
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 

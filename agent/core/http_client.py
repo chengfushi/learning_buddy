@@ -1,7 +1,6 @@
 """应用级 HTTP 客户端、连接池和受控重试。
 
-所有外部模型调用共享客户端，避免每个请求重复建立连接；重试只覆盖网络错误
-和 5xx 响应，不重试 4xx 或认证错误。
+所有外部模型调用共享客户端，避免每个请求重复建立连接。
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from typing import Any
 
 import httpx
 
-from db import settings
+from core.config import settings
 
 _async_client: httpx.AsyncClient | None = None
 _sync_client: httpx.Client | None = None
@@ -43,8 +42,6 @@ def _circuit_key(url: str) -> str:
 
 
 def _circuit_allows(url: str) -> bool:
-    import time
-
     key = _circuit_key(url)
     with _circuits_lock:
         circuit = _circuits.setdefault(key, _Circuit())
@@ -58,8 +55,6 @@ def _circuit_allows(url: str) -> bool:
 
 
 def _record(url: str, success: bool) -> None:
-    import time
-
     key = _circuit_key(url)
     with _circuits_lock:
         circuit = _circuits.setdefault(key, _Circuit())
@@ -73,7 +68,6 @@ def _record(url: str, success: bool) -> None:
 
 
 def init_sync_client() -> httpx.Client:
-    """创建或返回进程级同步客户端，供解析线程使用。"""
     global _sync_client
     with _sync_lock:
         if _sync_client is None:
@@ -87,7 +81,6 @@ def init_sync_client() -> httpx.Client:
 
 
 async def init_async_client() -> httpx.AsyncClient:
-    """创建或返回应用级异步客户端。"""
     global _async_client
     async with _async_lock:
         if _async_client is None:
@@ -113,7 +106,6 @@ def get_async_client() -> httpx.AsyncClient:
 
 
 async def close_clients() -> None:
-    """关闭共享客户端，释放连接池。"""
     global _async_client, _sync_client
     async_client = _async_client
     _async_client = None
@@ -141,7 +133,6 @@ def post_sync(
     json: Any,
     timeout: float,
 ) -> httpx.Response:
-    """同步调用模型服务，带并发限制、网络重试和熔断。"""
     if not _circuit_allows(url):
         raise ExternalServiceUnavailable(f"external service circuit open: {_circuit_key(url)}")
     last_error: Exception | None = None
@@ -179,7 +170,6 @@ async def post_async(
     json: Any,
     timeout: float,
 ) -> httpx.Response:
-    """异步调用模型服务，复用应用级 AsyncClient。"""
     if not _circuit_allows(url):
         raise ExternalServiceUnavailable(f"external service circuit open: {_circuit_key(url)}")
     last_error: Exception | None = None

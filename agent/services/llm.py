@@ -1,8 +1,7 @@
 """可插拔生成层（Tutor / Planner / Evaluator）。
 
-默认使用「确定性降级 mock 生成器」：不依赖任何 LLM key 即可在本地产出可用的
-答疑 / 学习计划 / 测评，保证全链路可跑通（呼应 engineering-standards R6 兜底）。
-若设置 LLM_API_KEY 且 LLM_BASE_URL，则走 OpenAI 兼容 Chat Completions。
+默认使用「确定性降级 mock 生成器」。
+若设置 LLM_API_KEY 则走 OpenAI 兼容 Chat Completions。
 """
 
 from __future__ import annotations
@@ -10,39 +9,20 @@ from __future__ import annotations
 import re
 from typing import Any, cast
 
-from db import settings
-from http_client import post_sync
-from pipeline import redact_for_cloud
+from core.config import settings
+from core.http_client import post_sync
+from core.utils import redact_for_cloud
+from models import ChunkView
 
 NO_EVIDENCE_RESPONSE = "当前知识库未找到依据"
 
 
-class ChunkView:
-    def __init__(
-        self,
-        team_id: int,
-        material_id: int,
-        chapter: str,
-        chunk_idx: int,
-        content: str,
-        chunk_id: int | None = None,
-        title: str = "",
-        kind: str = "body",
-        page_number: int | None = None,
-        score: float = 0.0,
-        asset_id: int | None = None,
-    ) -> None:
-        self.team_id = team_id
-        self.material_id = material_id
-        self.chapter = chapter
-        self.chunk_idx = chunk_idx
-        self.content = content
-        self.chunk_id = chunk_id
-        self.title = title
-        self.kind = kind
-        self.page_number = page_number
-        self.score = score
-        self.asset_id = asset_id
+def _first_sentence(text: str, max_len: int = 120) -> str:
+    text = (text or "").strip().replace("\n", " ")
+    sent = re.split(r"[。.!?！？；;]", text)[0].strip()
+    if not sent:
+        sent = text[:max_len]
+    return sent[:max_len]
 
 
 class LLM:
@@ -56,16 +36,8 @@ class LLM:
         raise NotImplementedError
 
 
-def _first_sentence(text: str, max_len: int = 120) -> str:
-    text = (text or "").strip().replace("\n", " ")
-    sent = re.split(r"[。.!?！？；;]", text)[0].strip()
-    if not sent:
-        sent = text[:max_len]
-    return sent[:max_len]
-
-
 class MockLLM(LLM):
-    """确定性、可复现的 mock 生成器：基于召回片段做抽取式组织，不调用外部模型。"""
+    """确定性、可复现的 mock 生成器。"""
 
     def chat(self, question: str, chunks: list[ChunkView], history: Any = None) -> str:
         if not chunks:
@@ -106,7 +78,6 @@ class MockLLM(LLM):
             sent = _first_sentence(text, 80)
             ans = distractors[i % len(distractors)] if distractors else "正确"
             opts = [ans, "选项二", "选项三", "选项四"]
-            # 打乱确定化（按索引）
             opts = opts[:1] + opts[1:][::-1] if i % 2 else opts
             items.append(
                 {
@@ -120,8 +91,6 @@ class MockLLM(LLM):
 
 
 class OpenAILLM(LLM):
-    """OpenAI 兼容 Chat Completions（可选）。"""
-
     def _complete(self, system: str, user: str) -> str:
         resp = post_sync(
             f"{settings.llm_base_url.rstrip('/')}/chat/completions",

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-import cache
-from db import settings
+import core.cache as cache
+from core.config import settings
 
 
 def test_redis_client_has_bounded_connect_and_socket_timeouts(

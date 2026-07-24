@@ -1,0 +1,32 @@
+[project]
+name = "learning-buddy-agent"
+version = "0.1.0"
+description = "智能学伴系统 AI 层——多智能体协作"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn>=0.30.0",
+    "psycopg2-binary>=2.9.9",
+    "pgvector>=0.2.5",
+    "numpy>=1.26.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    "python-dotenv>=1.0.1",
+    "httpx>=0.27.0",
+    "python-docx>=1.1.2",
+    "PyMuPDF>=1.24.0",
+    "minio>=7.2.0",
+    "redis>=5.0.0",
+    "prometheus-client>=0.20.0",
+    "PyYAML>=6.0.0",
+    "types-PyYAML>=6.0.12.20250516",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "ruff>=0.5.0",
+    "mypy>=1.11.0",
+]

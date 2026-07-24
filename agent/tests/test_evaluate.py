@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 import evaluate
-from schemas import RerankItem, RerankResponse
+from models import RerankItem, RerankResponse
 
 
 def evaluation_result(
