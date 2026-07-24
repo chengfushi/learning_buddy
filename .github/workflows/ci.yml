@@ -164,6 +164,9 @@ jobs:
           bash tests/e2e/e2e.sh
           bash tests/e2e/r2.sh
 
+      - name: Validate API contract source
+        run: bash tests/contracts/validate-openapi.sh
+
       - name: Upload coverage reports
         if: always()
         uses: actions/upload-artifact@v4
