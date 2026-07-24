@@ -60,16 +60,24 @@ jobs:
         env:
           PGPASSWORD: postgres
         run: |
+          psql -h 127.0.0.1 -U postgres -d learning_buddy -v ON_ERROR_STOP=1 \
+            -c "CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(120) PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
           for migration in backend/migrations/*.sql; do
             psql -h 127.0.0.1 -U postgres -d learning_buddy -v ON_ERROR_STOP=1 -f "$migration"
+            psql -h 127.0.0.1 -U postgres -d learning_buddy -v ON_ERROR_STOP=1 \
+              -c "INSERT INTO schema_migrations(version) VALUES ('$(basename "$migration")') ON CONFLICT (version) DO NOTHING"
           done
 
       - name: Verify migrations are repeatable and complete
         env:
           PGPASSWORD: postgres
         run: |
+          psql -h 127.0.0.1 -U postgres -d learning_buddy -v ON_ERROR_STOP=1 \
+            -c "CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(120) PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
           for migration in backend/migrations/*.sql; do
             psql -h 127.0.0.1 -U postgres -d learning_buddy -v ON_ERROR_STOP=1 -f "$migration"
+            psql -h 127.0.0.1 -U postgres -d learning_buddy -v ON_ERROR_STOP=1 \
+              -c "INSERT INTO schema_migrations(version) VALUES ('$(basename "$migration")') ON CONFLICT (version) DO NOTHING"
           done
           psql -h 127.0.0.1 -U postgres -d learning_buddy -v ON_ERROR_STOP=1 <<'SQL'
           DO $$
@@ -79,7 +87,8 @@ jobs:
             FOREACH required_table IN ARRAY ARRAY[
               'users', 'teams', 'team_members', 'materials', 'material_chunks',
               'agent_sessions', 'agent_messages', 'exercises', 'study_plans',
-              'token_usage', 'message_feedback', 'rag_runs', 'refresh_tokens'
+              'token_usage', 'message_feedback', 'rag_runs', 'refresh_tokens',
+              'schema_migrations'
             ] LOOP
               IF to_regclass(required_table) IS NULL THEN
                 RAISE EXCEPTION 'required table is missing: %', required_table;
