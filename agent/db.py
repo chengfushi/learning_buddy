@@ -69,6 +69,7 @@ class Settings(BaseSettings):
     short_document_chars: int = 5000
     max_context_tokens: int = 12000
     port: int = 8000
+    cors_origins: str = ""
 
 
 settings = Settings()

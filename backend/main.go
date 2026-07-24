@@ -4,11 +4,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -23,6 +28,8 @@ import (
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	cfg := config.Load()
 	if err := cfg.Validate(); err != nil {
 		slog.Error("invalid backend config", "err", err)
@@ -43,11 +50,11 @@ func main() {
 
 	repos := repository.New(db)
 	svcs := service.New(repos, cfg)
-	if err := svcs.Materials.RecoverParseTasks(context.Background()); err != nil {
+	if err := svcs.Materials.RecoverParseTasks(ctx); err != nil {
 		slog.Error("recover parse tasks", "err", err)
 		os.Exit(1)
 	}
-	go svcs.Materials.RunParseDispatcher(context.Background())
+	go svcs.Materials.RunParseDispatcher(ctx)
 	r := gin.Default()
 	r.Use(observability.HTTPMetrics())
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
@@ -55,9 +62,22 @@ func main() {
 
 	addr := cfg.Addr
 	slog.Info("backend listening", "addr", addr)
-	if err := r.Run(addr); err != nil {
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server exit", "err", err)
+			stop()
+		}
+	}()
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		slog.Error("server exit", "err", err)
-		os.Exit(1)
 	}
 }
 

@@ -50,6 +50,24 @@ describe("api", () => {
     );
   });
 
+  it("refreshes once after a 401 and retries with the new in-memory token", async () => {
+    const { setToken, getToken } = await import("./api");
+    setToken("expired-token");
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "expired" }), { status: 401 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ access_token: "rotated-token" }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ user: { ID: 1 } }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.me()).resolves.toEqual({ user: { ID: 1 } });
+    expect(getToken()).toBe("rotated-token");
+    expect(fetchMock).toHaveBeenNthCalledWith(2, "/api/auth/refresh", expect.anything());
+    expect(fetchMock).toHaveBeenNthCalledWith(3, "/api/me", expect.anything());
+  });
+
   it("rejects an invalid team-material write capability contract", async () => {
     vi.stubGlobal(
       "fetch",
@@ -155,7 +173,9 @@ describe("api", () => {
 
   it("keeps the SSE access token in the Authorization header and out of the URL", async () => {
     const token = "sensitive-sse-token";
-    vi.mocked(localStorage.getItem).mockReturnValue(token);
+    vi.mocked(localStorage.getItem).mockReturnValue(null);
+    const { setToken } = await import("./api");
+    setToken(token);
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response('data: {"type":"done","citations":[]}\n\n', {
         status: 200,

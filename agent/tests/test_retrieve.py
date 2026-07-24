@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 
 import psycopg2
@@ -17,14 +18,14 @@ TEAM_ID = 900002
 MATERIAL_ID = 900003
 
 
-def _conn():
+def _conn() -> psycopg2.extensions.connection:
     conn = psycopg2.connect(settings.pg_dsn, connect_timeout=5)
     register_vector(conn)
     return conn
 
 
 @pytest.fixture
-def parse_material():
+def parse_material() -> Iterator[None]:
     conn = _conn()
     try:
         with conn.cursor() as cur:
@@ -55,7 +56,7 @@ def parse_material():
 
 def test_agent_does_not_expose_retrieval_permission_surface() -> None:
     """R2：权限检索已经收口 Backend repository，Agent 不再提供 /retrieve。"""
-    paths = {route.path for route in main.app.routes}
+    paths = {getattr(route, "path", "") for route in main.app.routes}
     assert "/retrieve" not in paths
     assert "/embed" in paths
 

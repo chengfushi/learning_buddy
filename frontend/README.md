@@ -17,7 +17,7 @@
 React 18 SPA (Vite + TypeScript)
     ├── 路由：知识库 / 团队 / AI 学伴 / 学习中心
     ├── 状态：Zustand（全局）+ React Query（服务端缓存）
-    ├── 鉴权：JWT Bearer Token（localStorage）
+    ├── 鉴权：短时 JWT Bearer Token（仅内存）+ httpOnly refresh Cookie
     └── AI 流式：fetch + ReadableStream（SSE，带 Authorization Header）
 ```
 
@@ -200,6 +200,6 @@ npm run format
 
 1. **类型安全**：TypeScript `strict: true`，禁用 `any`。所有 API 请求/响应严格类型化，Zod 校验后端响应。
 2. **SSE 鉴权**：使用 `fetch` + `ReadableStream` 实现流式对话（`streamPost()`），可在 Header 中携带 JWT token，避免 `EventSource` 的 URL 参数泄漏问题（R4）。
-3. **鉴权管理**：`auth.tsx` 提供 `useAuth()` Hook，负责登录态维护、自动恢复（localStorage token）、角色感知。
+3. **鉴权管理**：`auth.tsx` 提供 `useAuth()` Hook，负责登录态维护、401 自动刷新、内存 token 与角色感知；refresh token 不可被 JavaScript 读取。
 4. **错误处理**：`ApiError` 类统一封装 HTTP 错误，前端组件可基于 `status` 码差异化提示。
 5. **零组件库**：纯 CSS 实现，无第三方 UI 组件依赖，便于团队自主掌控样式。

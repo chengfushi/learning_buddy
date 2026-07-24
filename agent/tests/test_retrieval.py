@@ -119,7 +119,8 @@ async def test_transient_embedding_failure_is_not_cached(
     assert rewrite_calls() == 1
     assert embed_calls == 2
     analysis_values = [value for key, value in values.items() if key.startswith("rag:analysis:")]
-    assert analysis_values and "embedding" not in analysis_values[0]
+    assert analysis_values and isinstance(analysis_values[0], dict)
+    assert "embedding" not in analysis_values[0]
 
 
 @pytest.mark.anyio

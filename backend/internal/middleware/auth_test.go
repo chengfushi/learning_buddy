@@ -178,8 +178,9 @@ func TestContextAccessorsReturnZeroValuesForUnexpectedData(t *testing.T) {
 func signTestToken(t *testing.T, secret string, userID int64, role string) string {
 	t.Helper()
 	claims := service.Claims{
-		UserID: userID,
-		Role:   role,
+		UserID:    userID,
+		Role:      role,
+		TokenType: "access",
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   "42",
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),

@@ -39,6 +39,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(r.user);
   };
   const logout = () => {
+    void api.logout().catch(() => undefined);
     clearToken();
     setUser(null);
   };

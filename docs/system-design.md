@@ -197,6 +197,7 @@ handler (Gin) → service (业务/RBAC/team) → repository (GORM) → PostgreSQ
 | POST | `/api/auth/login` | 登录 | 否 |
 | POST | `/api/auth/register` | 注册（默认 student，自动建私人 team） | 否 |
 | POST | `/api/auth/refresh` | 刷新 token（httpOnly Cookie） | 是 |
+| POST | `/api/auth/logout` | 撤销 refresh token family 并清除 Cookie | 是 |
 | GET | `/api/teams` | 我可见的 team 列表（私人 + 已加入 + 公共） | 是 |
 | POST | `/api/teams` | 老师创建学习小组 team（返回 `join_code`） | teacher |
 | POST | `/api/teams/:id/join` | 学生凭 `join_code` 申请加入（→ pending） | student |

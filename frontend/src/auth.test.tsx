@@ -3,7 +3,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { api, type User } from "./api";
+import { api, getToken, setToken, type User } from "./api";
 import { AuthProvider, useAuth } from "./auth";
 
 const student: User = {
@@ -101,7 +101,7 @@ describe("AuthProvider", () => {
   });
 
   it("restores the current user from an existing token", async () => {
-    localStorage.setItem("lb_token", "existing-token");
+    setToken("existing-token");
     const me = vi.spyOn(api, "me").mockResolvedValue({ user: student });
 
     renderProvider();
@@ -110,25 +110,24 @@ describe("AuthProvider", () => {
     await waitFor(() => expect(screen.getByTestId("user").textContent).toBe(student.Email));
     expect(screen.getByTestId("ready").textContent).toBe("ready");
     expect(me).toHaveBeenCalledOnce();
-    expect(localStorage.getItem("lb_token")).toBe("existing-token");
+    expect(getToken()).toBe("existing-token");
   });
 
   it("clears an invalid persisted token and remains logged out", async () => {
-    localStorage.setItem("lb_token", "expired-token");
+    setToken("expired-token");
     vi.spyOn(api, "me").mockRejectedValue(new Error("登录已失效"));
 
     renderProvider();
 
     await waitFor(() => expect(screen.getByTestId("ready").textContent).toBe("ready"));
     expect(screen.getByTestId("user").textContent).toBe("guest");
-    expect(localStorage.getItem("lb_token")).toBeNull();
+    expect(getToken()).toBeNull();
   });
 
   it("stores the access token and user after login", async () => {
     const login = vi.spyOn(api, "login").mockResolvedValue({
       user: student,
       access_token: "login-token",
-      refresh_token: "refresh-token",
     });
     renderProvider();
     await waitFor(() => expect(screen.getByTestId("ready").textContent).toBe("ready"));
@@ -137,14 +136,13 @@ describe("AuthProvider", () => {
 
     await waitFor(() => expect(screen.getByTestId("user").textContent).toBe(student.Email));
     expect(login).toHaveBeenCalledWith(student.Email, "password123");
-    expect(localStorage.getItem("lb_token")).toBe("login-token");
+    expect(getToken()).toBe("login-token");
   });
 
   it("stores the access token and user after registration", async () => {
     const register = vi.spyOn(api, "register").mockResolvedValue({
       user: teacher,
       access_token: "register-token",
-      refresh_token: "refresh-token",
     });
     renderProvider();
     await waitFor(() => expect(screen.getByTestId("ready").textContent).toBe("ready"));
@@ -158,11 +156,11 @@ describe("AuthProvider", () => {
       teacher.DisplayName,
       teacher.Role,
     );
-    expect(localStorage.getItem("lb_token")).toBe("register-token");
+    expect(getToken()).toBe("register-token");
   });
 
   it("clears both token and user on logout", async () => {
-    localStorage.setItem("lb_token", "existing-token");
+    setToken("existing-token");
     vi.spyOn(api, "me").mockResolvedValue({ user: student });
     renderProvider();
     await waitFor(() => expect(screen.getByTestId("user").textContent).toBe(student.Email));
@@ -170,7 +168,7 @@ describe("AuthProvider", () => {
     fireEvent.click(screen.getByRole("button", { name: "logout" }));
 
     expect(screen.getByTestId("user").textContent).toBe("guest");
-    expect(localStorage.getItem("lb_token")).toBeNull();
+    expect(getToken()).toBeNull();
   });
 
   it("rejects useAuth outside AuthProvider", () => {

@@ -46,8 +46,6 @@ services:
       RERANK_MODEL: qwen3-rerank
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    ports:
-      - "8000:8000" # 仅本地验收；生产部署应仅暴露容器内网
 
   frontend:
     build: ./frontend

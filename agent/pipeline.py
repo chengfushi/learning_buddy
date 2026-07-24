@@ -19,6 +19,8 @@ from docx import Document
 from docx.document import Document as DocxDocument
 from docx.oxml.xmlchemy import BaseOxmlElement
 
+__all__ = ["estimate_tokens", "httpx"]
+
 from db import settings
 from storage import read_source, write_derived
 

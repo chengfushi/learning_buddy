@@ -158,8 +158,9 @@ backend/
 | Method | Path | 说明 |
 |--------|------|------|
 | `POST` | `/api/auth/register` | 注册（默认 student，自动建私人 team） |
-| `POST` | `/api/auth/login` | 登录，返回 JWT（access + refresh） |
+| `POST` | `/api/auth/login` | 登录，返回 15 分钟 access JWT，并设置 httpOnly refresh Cookie |
 | `POST` | `/api/auth/refresh` | 刷新 access token |
+| `POST` | `/api/auth/logout` | 撤销 refresh token family 并清除 Cookie |
 
 ### 鉴权接口（需 Bearer Token）
 

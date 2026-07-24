@@ -23,6 +23,7 @@ func Register(r *gin.Engine, svc *service.Services) {
 	api.POST("/auth/register", h.register)
 	api.POST("/auth/login", h.login)
 	api.POST("/auth/refresh", h.refresh)
+	api.POST("/auth/logout", h.logout)
 
 	// 鉴权接口
 	auth := api.Group("")

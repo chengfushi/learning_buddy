@@ -269,8 +269,6 @@ export interface ChatResult {
   citations: Citation[];
 }
 
-const TOKEN_KEY = "lb_token";
-
 const MaterialAssetSchema: z.ZodType<MaterialAsset> = z.object({
   id: z.number(),
   page_number: z.number().nullable(),
@@ -292,14 +290,16 @@ const MaterialProcessingSchema: z.ZodType<MaterialProcessing> = z.object({
 });
 
 export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY);
+  return accessToken;
 }
 export function setToken(t: string): void {
-  localStorage.setItem(TOKEN_KEY, t);
+  accessToken = t;
 }
 export function clearToken(): void {
-  localStorage.removeItem(TOKEN_KEY);
+  accessToken = null;
 }
+
+let accessToken: string | null = null;
 
 class ApiError extends Error {
   status: number;
@@ -314,6 +314,7 @@ async function request<T>(
   path: string,
   body?: unknown,
   schema?: z.ZodType<T>,
+  canRefresh = true,
 ): Promise<T> {
   const headers: Record<string, string> = {};
   const token = getToken();
@@ -323,7 +324,22 @@ async function request<T>(
     method,
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
+    credentials: "include",
   });
+  if (
+    res.status === 401 &&
+    canRefresh &&
+    path !== "/auth/refresh" &&
+    path !== "/auth/login" &&
+    path !== "/auth/register"
+  ) {
+    try {
+      await refreshAccessToken();
+      return request(method, path, body, schema, false);
+    } catch {
+      clearToken();
+    }
+  }
   if (!res.ok) {
     let msg = `请求失败 (${res.status})`;
     try {
@@ -343,6 +359,7 @@ async function streamPost(
   path: string,
   body: unknown,
   onLine: (line: string) => void,
+  canRefresh = true,
 ): Promise<void> {
   const token = getToken();
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -351,7 +368,16 @@ async function streamPost(
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    credentials: "include",
   });
+  if (res.status === 401 && canRefresh) {
+    try {
+      await refreshAccessToken();
+      return streamPost(path, body, onLine, false);
+    } catch {
+      clearToken();
+    }
+  }
   if (!res.ok || !res.body) {
     let msg = `请求失败 (${res.status})`;
     try {
@@ -381,20 +407,43 @@ async function streamPost(
   if (trailing.startsWith("data:")) onLine(trailing.slice(5).trim());
 }
 
+let refreshPromise: Promise<string> | null = null;
+
+async function refreshAccessToken(): Promise<string> {
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = fetch("/api/auth/refresh", {
+    method: "POST",
+    credentials: "include",
+  })
+    .then(async (res) => {
+      if (!res.ok) throw new Error("refresh failed");
+      const payload = (await res.json()) as { access_token?: string };
+      if (!payload.access_token) throw new Error("refresh response missing access token");
+      setToken(payload.access_token);
+      return payload.access_token;
+    })
+    .finally(() => {
+      refreshPromise = null;
+    });
+  return refreshPromise;
+}
+
 export const api = {
   // 账号
   register: (email: string, password: string, displayName: string, role: string) =>
-    request<{ user: User; access_token: string; refresh_token: string }>("POST", "/auth/register", {
+    request<{ user: User; access_token: string }>("POST", "/auth/register", {
       email,
       password,
       display_name: displayName,
       role,
     }),
   login: (email: string, password: string) =>
-    request<{ user: User; access_token: string; refresh_token: string }>("POST", "/auth/login", {
+    request<{ user: User; access_token: string }>("POST", "/auth/login", {
       email,
       password,
     }),
+  refresh: () => request<{ access_token: string }>("POST", "/auth/refresh"),
+  logout: () => request<void>("POST", "/auth/logout"),
   me: () => request<{ user: User }>("GET", "/me"),
 
   // 团队
